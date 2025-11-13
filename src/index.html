@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Tauri App</title>
+    <script type="module" src="/main.js" defer></script>
+  </head>
+
+  <body>
+    <div class="app">
+      <aside class="sidebar">
+        <div class="sidebar-title">Kubernetes</div>
+        <nav class="sidebar-nav">
+          <ul id="resource-list">
+            <li data-kind="pod" class="active">pod</li>
+            <li data-kind="deploy">deploy</li>
+            <li data-kind="sts">sts</li>
+            <li data-kind="pv">pv</li>
+            <li data-kind="pvc">pvc</li>
+            <li data-kind="sc">sc</li>
+            <li data-kind="crd">crd</li>
+          </ul>
+        </nav>
+      </aside>
+      <main class="content">
+        <header class="content-header">
+          <div class="header-left">
+            <h1 id="current-kind">pod</h1>
+            <div class="divider"></div>
+            <label class="ns-label" for="namespace-select">Namespace</label>
+            <select id="namespace-select">
+              <option value="all" selected>All namespaces</option>
+            </select>
+          </div>
+          <div class="header-right">
+            <span id="loading-indicator" class="loading-indicator" aria-hidden="true"></span>
+            <span class="refresh-controls">
+              <span class="refresh-hint">Next refresh</span>
+              <span class="refresh-countdown" id="refresh-countdown" title="Until next automatic refresh (seconds)">5</span>
+              <select id="auto-refresh-select" title="Auto refresh interval">
+                <option value="5" selected>5s</option>
+                <option value="10">10s</option>
+              </select>
+            </span>
+            <button id="refresh-btn" title="Refresh">Refresh</button>
+          </div>
+        </header>
+        <section id="content-area">
+          <div id="status" class="status"></div>
+          <div id="table-container"></div>
+        </section>
+        <div id="viewer-overlay" class="viewer-overlay" aria-hidden="true">
+          <div class="viewer-panel" role="dialog" aria-modal="true" aria-labelledby="viewer-title">
+            <div class="viewer-header">
+              <div class="viewer-title" id="viewer-title">Viewer</div>
+              <div class="viewer-tabs" role="tablist" aria-label="Viewer tabs">
+                <button class="viewer-tab" data-tab="yaml" role="tab" aria-selected="true" aria-controls="viewer-yaml">YAML</button>
+                <button class="viewer-tab" data-tab="tree" role="tab" aria-selected="false" aria-controls="viewer-tree">Tree</button>
+              </div>
+              <div class="viewer-actions">
+                <button id="viewer-copy">Copy</button>
+                <button id="viewer-close" aria-label="Close">Close</button>
+              </div>
+            </div>
+            <div class="viewer-body">
+              <pre id="viewer-yaml"></pre>
+              <pre id="viewer-logs" hidden></pre>
+              <div id="viewer-tree" class="viewer-tree" hidden></div>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+  </body>
+</html>
