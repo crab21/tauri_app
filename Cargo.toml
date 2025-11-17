@@ -9,7 +9,7 @@ leptos = { version = "0.7", features = ["csr"] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
-web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlInputElement"] }
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlInputElement", "NodeList", "HtmlElement"] }
 serde = { version = "1", features = ["derive"] }
 serde-wasm-bindgen = "0.6"
 serde_json = "1"

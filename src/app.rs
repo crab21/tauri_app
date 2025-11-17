@@ -10,7 +10,10 @@ fn DescribeContent(
     set_detail: WriteSignal<Option<serde_json::Value>>,
 ) -> impl IntoView {
     let (search_query, set_search_query) = signal::<String>(String::new());
+    let (current_match_index, set_current_match_index) = signal::<Option<usize>>(None);
+    let (match_count, set_match_count) = signal::<usize>(0);
     let search_input_ref = NodeRef::<leptos::html::Input>::new();
+    let content_ref = NodeRef::<leptos::html::Pre>::new();
     
     let yaml_text = move || match detail.get() {
         Some(v) => {
@@ -23,11 +26,13 @@ fn DescribeContent(
         None => String::new(),
     };
 
-    // Highlight text with search query - returns HTML string
+    // Highlight text with search query - returns HTML string with match indices
     let highlighted_text_html = move || {
         let text = yaml_text();
         let query = search_query.get();
         if query.is_empty() {
+            set_match_count.set(0);
+            set_current_match_index.set(None);
             return text;
         }
         
@@ -36,11 +41,14 @@ fn DescribeContent(
         let mut result = String::new();
         let mut last_end = 0;
         let mut search_start = 0;
+        let mut match_idx = 0;
+        let mut matches = Vec::new();
         
         // Find all matches and build HTML
         while let Some(pos) = text_lower[search_start..].find(&query_lower) {
             let actual_pos = search_start + pos;
             let end_pos = actual_pos + query.len();
+            matches.push(actual_pos);
             
             // Add text before match (escape HTML)
             if actual_pos > last_end {
@@ -48,13 +56,14 @@ fn DescribeContent(
                 result.push_str(&before.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;"));
             }
             
-            // Add highlighted match
+            // Add highlighted match with data attribute for navigation
             let matched = &text[actual_pos..end_pos];
             let escaped = matched.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
-            result.push_str(&format!("<mark style=\"background-color:#ffeb3b;color:#000;padding:0 2px;\">{}</mark>", escaped));
+            result.push_str(&format!("<mark data-match-index=\"{}\" style=\"background-color:#ffeb3b;color:#000;padding:0 2px;\">{}</mark>", match_idx, escaped));
             
             last_end = end_pos;
             search_start = actual_pos + 1;
+            match_idx += 1;
         }
         
         // Add remaining text
@@ -63,10 +72,73 @@ fn DescribeContent(
             result.push_str(&remaining.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;"));
         }
         
-        if result.is_empty() {
+        set_match_count.set(matches.len());
+        if matches.is_empty() {
+            set_current_match_index.set(None);
             text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
         } else {
+            let should_navigate = current_match_index.get().is_none() || current_match_index.get().unwrap() >= matches.len();
+            if should_navigate {
+                set_current_match_index.set(Some(0));
+            }
             result
+        }
+    };
+    
+    // Navigate to match
+    let navigate_to_match = {
+        let content_ref = content_ref.clone();
+        move |index: usize| {
+            if let Some(_pre) = content_ref.get() {
+                let window = web_sys::window().unwrap();
+                let document = window.document().unwrap();
+                if let Ok(Some(mark)) = document.query_selector(&format!("mark[data-match-index=\"{}\"]", index)) {
+                    mark.scroll_into_view_with_bool(true);
+                    // Update all marks to highlight current one
+                    let selector = "mark[data-match-index]";
+                    if let Ok(marks) = document.query_selector_all(selector) {
+                        for i in 0..marks.length() {
+                            if let Some(node) = marks.item(i) {
+                                if let Some(m) = node.dyn_ref::<web_sys::Element>() {
+                                    if let Some(attr) = m.get_attribute("data-match-index") {
+                                        if attr == index.to_string() {
+                                            let _ = m.set_attribute("style", "background-color:#ff9800;color:#000;padding:0 2px;");
+                                        } else {
+                                            let _ = m.set_attribute("style", "background-color:#ffeb3b;color:#000;padding:0 2px;");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    };
+    
+    let go_to_next = {
+        let navigate_to_match = navigate_to_match.clone();
+        move |_| {
+            let count = match_count.get();
+            if count > 0 {
+                let current = current_match_index.get().unwrap_or(0);
+                let next = (current + 1) % count;
+                set_current_match_index.set(Some(next));
+                navigate_to_match(next);
+            }
+        }
+    };
+    
+    let go_to_prev = {
+        let navigate_to_match = navigate_to_match.clone();
+        move |_| {
+            let count = match_count.get();
+            if count > 0 {
+                let current = current_match_index.get().unwrap_or(0);
+                let prev = if current == 0 { count - 1 } else { current - 1 };
+                set_current_match_index.set(Some(prev));
+                navigate_to_match(prev);
+            }
         }
     };
 
@@ -102,17 +174,43 @@ fn DescribeContent(
                 </div>
             </div>
             <div style="padding:8px 12px;border-bottom:1px solid #eee;background:#f5f5f5;flex-shrink:0;">
-                <input
-                    node_ref=search_input_ref
-                    type="text"
-                    placeholder="Search... (Cmd+F / Ctrl+F)"
-                    value=move || search_query.get()
-                    on:input=move |e| set_search_query.set(event_target_value(&e))
-                    style="width:100%;padding:6px 10px;border:1px solid #ddd;border-radius:4px;font-size:13px;"
-                />
+                <div style="display:flex;gap:8px;align-items:center;">
+                    <input
+                        node_ref=search_input_ref
+                        type="text"
+                        placeholder="Search... (Cmd+F / Ctrl+F)"
+                        value=move || search_query.get()
+                        on:input=move |e| {
+                            set_search_query.set(event_target_value(&e));
+                            set_current_match_index.set(None);
+                        }
+                        style="flex:1;padding:6px 10px;border:1px solid #ddd;border-radius:4px;font-size:13px;"
+                    />
+                    <Show when=move || { match_count.get() > 0 }>
+                        <div style="display:flex;gap:4px;align-items:center;font-size:12px;color:#666;">
+                            <button 
+                                on:click=go_to_prev
+                                style="padding:4px 8px;border:1px solid #ddd;border-radius:4px;background:#fff;cursor:pointer;font-size:12px;"
+                                disabled=move || match_count.get() == 0
+                            >"◀ Prev"</button>
+                            <span style="min-width:60px;text-align:center;">
+                                { move || format!("{}/{}", current_match_index.get().map(|i| i + 1).unwrap_or(0), match_count.get()) }
+                            </span>
+                            <button 
+                                on:click=go_to_next
+                                style="padding:4px 8px;border:1px solid #ddd;border-radius:4px;background:#fff;cursor:pointer;font-size:12px;"
+                                disabled=move || match_count.get() == 0
+                            >"Next ▶"</button>
+                        </div>
+                    </Show>
+                </div>
             </div>
             <div style="padding:0;flex:1;overflow-y:auto;overflow-x:auto;background:#0b1021;min-height:0;">
-                <pre style="margin:0;padding:12px;white-space:pre;overflow:visible;color:#d6e1ff;text-align:left;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace;" inner_html=highlighted_text_html></pre>
+                <pre 
+                    node_ref=content_ref
+                    style="margin:0;padding:12px;white-space:pre;overflow:visible;color:#d6e1ff;text-align:left;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace;" 
+                    inner_html=highlighted_text_html
+                ></pre>
             </div>
         </div>
     }
@@ -900,11 +998,14 @@ pub fn App() -> impl IntoView {
     let (fr_errors_str, set_fr_errors_str) = signal(String::new());
     let (fr_items, set_fr_items) = signal::<Vec<ResourceSummary>>(Vec::new());
     let (fr_found, set_fr_found) = signal(false);
+    // Sort state: true = ascending (oldest first), false = descending (newest first)
+    let (created_sort_asc, set_created_sort_asc) = signal(true);
     Effect::new(move |_| {
         // establish reactive dependencies
         let ov = overview.get();
         let key = selected_key.get();
         let ns_filter = selected_ns.get();
+        let _sort_asc = created_sort_asc.get(); // React to sort changes
         let mut has_errors = false;
         let mut errors_str = String::new();
         let mut items: Vec<ResourceSummary> = Vec::new();
@@ -924,6 +1025,17 @@ pub fn App() -> impl IntoView {
                         .filter(|it| it.reference.namespace.as_deref() == Some(ns.as_str()))
                         .collect();
                 }
+                // Sort by creation_timestamp
+                let sort_asc = created_sort_asc.get();
+                items.sort_by(|a, b| {
+                    let a_ts = a.creation_timestamp.as_deref().unwrap_or("");
+                    let b_ts = b.creation_timestamp.as_deref().unwrap_or("");
+                    if sort_asc {
+                        a_ts.cmp(b_ts)
+                    } else {
+                        b_ts.cmp(a_ts)
+                    }
+                });
                 found = true;
             } else {
                 let parts: Vec<&str> = k.split('/').collect();
@@ -946,6 +1058,17 @@ pub fn App() -> impl IntoView {
                                 .filter(|it| it.reference.namespace.as_deref() == Some(ns.as_str()))
                                 .collect();
                         }
+                        // Sort by creation_timestamp
+                        let sort_asc = created_sort_asc.get();
+                        items.sort_by(|a, b| {
+                            let a_ts = a.creation_timestamp.as_deref().unwrap_or("");
+                            let b_ts = b.creation_timestamp.as_deref().unwrap_or("");
+                            if sort_asc {
+                                a_ts.cmp(b_ts)
+                            } else {
+                                b_ts.cmp(a_ts)
+                            }
+                        });
                         found = true;
                     }
                 }
@@ -1287,7 +1410,19 @@ pub fn App() -> impl IntoView {
                                                                 <th style="text-align:left;border-bottom:1px solid #ddd;padding:8px 12px;vertical-align:middle;">"Endpoints"</th>
                                                             </Show>
                                                             <Show when=move || !is_pv && !is_pvc>
-                                                                <th style="text-align:left;border-bottom:1px solid #ddd;padding:8px 12px;vertical-align:middle;">"Created"</th>
+                                                                <th 
+                                                                    style="text-align:left;border-bottom:1px solid #ddd;padding:8px 12px;vertical-align:middle;cursor:pointer;user-select:none;"
+                                                                    on:click=move |_| {
+                                                                        set_created_sort_asc.set(!created_sort_asc.get());
+                                                                    }
+                                                                >
+                                                                    <span style="display:flex;align-items:center;gap:4px;">
+                                                                        "Created"
+                                                                        <span style="font-size:10px;color:#666;">
+                                                                            { move || if created_sort_asc.get() { "↑" } else { "↓" } }
+                                                                        </span>
+                                                                    </span>
+                                                                </th>
                                                             </Show>
                                                             <th style="text-align:left;border-bottom:1px solid #ddd;padding:8px 12px;vertical-align:middle;">"Actions"</th>
                                                         </tr>
@@ -1752,14 +1887,19 @@ pub fn App() -> impl IntoView {
                     <Show when=move || logs.get().is_some()>
                         { move || {
                             let (search_query, set_search_query) = signal::<String>(String::new());
+                            let (current_match_index, set_current_match_index) = signal::<Option<usize>>(None);
+                            let (match_count, set_match_count) = signal::<usize>(0);
                             let search_input_ref = NodeRef::<leptos::html::Input>::new();
+                            let content_ref = NodeRef::<leptos::html::Pre>::new();
                             let logs_content = move || logs.get().unwrap_or_default();
                             
-                            // Highlight text with search query - returns HTML string
+                            // Highlight text with search query - returns HTML string with match indices
                             let highlighted_logs_html = move || {
                                 let text = logs_content();
                                 let query = search_query.get();
                                 if query.is_empty() {
+                                    set_match_count.set(0);
+                                    set_current_match_index.set(None);
                                     return text;
                                 }
                                 
@@ -1768,11 +1908,14 @@ pub fn App() -> impl IntoView {
                                 let mut result = String::new();
                                 let mut last_end = 0;
                                 let mut search_start = 0;
+                                let mut match_idx = 0;
+                                let mut matches = Vec::new();
                                 
                                 // Find all matches and build HTML
                                 while let Some(pos) = text_lower[search_start..].find(&query_lower) {
                                     let actual_pos = search_start + pos;
                                     let end_pos = actual_pos + query.len();
+                                    matches.push(actual_pos);
                                     
                                     // Add text before match (escape HTML)
                                     if actual_pos > last_end {
@@ -1780,13 +1923,14 @@ pub fn App() -> impl IntoView {
                                         result.push_str(&before.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;"));
                                     }
                                     
-                                    // Add highlighted match
+                                    // Add highlighted match with data attribute for navigation
                                     let matched = &text[actual_pos..end_pos];
                                     let escaped = matched.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
-                                    result.push_str(&format!("<mark style=\"background-color:#ffeb3b;color:#000;padding:0 2px;\">{}</mark>", escaped));
+                                    result.push_str(&format!("<mark data-match-index=\"{}\" style=\"background-color:#ffeb3b;color:#000;padding:0 2px;\">{}</mark>", match_idx, escaped));
                                     
                                     last_end = end_pos;
                                     search_start = actual_pos + 1;
+                                    match_idx += 1;
                                 }
                                 
                                 // Add remaining text
@@ -1795,10 +1939,69 @@ pub fn App() -> impl IntoView {
                                     result.push_str(&remaining.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;"));
                                 }
                                 
-                                if result.is_empty() {
+                                set_match_count.set(matches.len());
+                                if matches.is_empty() {
+                                    set_current_match_index.set(None);
                                     text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
                                 } else {
+                                    if current_match_index.get().is_none() || current_match_index.get().unwrap() >= matches.len() {
+                                        set_current_match_index.set(Some(0));
+                                    }
                                     result
+                                }
+                            };
+                            
+                            // Navigate to match
+                            let navigate_to_match = move |index: usize| {
+                                if let Some(_pre) = content_ref.get() {
+                                    let window = web_sys::window().unwrap();
+                                    let document = window.document().unwrap();
+                                    if let Ok(Some(mark)) = document.query_selector(&format!("mark[data-match-index=\"{}\"]", index)) {
+                                        mark.scroll_into_view_with_bool(true);
+                                        // Update all marks to highlight current one
+                                        let selector = "mark[data-match-index]";
+                                        if let Ok(marks) = document.query_selector_all(selector) {
+                                            for i in 0..marks.length() {
+                                                if let Some(node) = marks.item(i) {
+                                                    if let Some(m) = node.dyn_ref::<web_sys::Element>() {
+                                                        if let Some(attr) = m.get_attribute("data-match-index") {
+                                                            if attr == index.to_string() {
+                                                                let _ = m.set_attribute("style", "background-color:#ff9800;color:#000;padding:0 2px;");
+                                                            } else {
+                                                                let _ = m.set_attribute("style", "background-color:#ffeb3b;color:#000;padding:0 2px;");
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            };
+                            
+                            let go_to_next = {
+                                let navigate_to_match = navigate_to_match.clone();
+                                move |_| {
+                                    let count = match_count.get();
+                                    if count > 0 {
+                                        let current = current_match_index.get().unwrap_or(0);
+                                        let next = (current + 1) % count;
+                                        set_current_match_index.set(Some(next));
+                                        navigate_to_match(next);
+                                    }
+                                }
+                            };
+                            
+                            let go_to_prev = {
+                                let navigate_to_match = navigate_to_match.clone();
+                                move |_| {
+                                    let count = match_count.get();
+                                    if count > 0 {
+                                        let current = current_match_index.get().unwrap_or(0);
+                                        let prev = if current == 0 { count - 1 } else { current - 1 };
+                                        set_current_match_index.set(Some(prev));
+                                        navigate_to_match(prev);
+                                    }
                                 }
                             };
 
@@ -1853,17 +2056,43 @@ pub fn App() -> impl IntoView {
                                             </div>
                                         </div>
                                         <div style="padding:8px 12px;border-bottom:1px solid #eee;background:#f5f5f5;">
-                                            <input
-                                                node_ref=search_input_ref
-                                                type="text"
-                                                placeholder="Search... (Cmd+F / Ctrl+F)"
-                                                value=move || search_query.get()
-                                                on:input=move |e| set_search_query.set(event_target_value(&e))
-                                                style="width:100%;padding:6px 10px;border:1px solid #ddd;border-radius:4px;font-size:13px;"
-                                            />
+                                            <div style="display:flex;gap:8px;align-items:center;">
+                                                <input
+                                                    node_ref=search_input_ref
+                                                    type="text"
+                                                    placeholder="Search... (Cmd+F / Ctrl+F)"
+                                                    value=move || search_query.get()
+                                                    on:input=move |e| {
+                                                        set_search_query.set(event_target_value(&e));
+                                                        set_current_match_index.set(None);
+                                                    }
+                                                    style="flex:1;padding:6px 10px;border:1px solid #ddd;border-radius:4px;font-size:13px;"
+                                                />
+                                                <Show when=move || { match_count.get() > 0 }>
+                                                    <div style="display:flex;gap:4px;align-items:center;font-size:12px;color:#666;">
+                                                        <button 
+                                                            on:click=go_to_prev
+                                                            style="padding:4px 8px;border:1px solid #ddd;border-radius:4px;background:#fff;cursor:pointer;font-size:12px;"
+                                                            disabled=move || match_count.get() == 0
+                                                        >"◀ Prev"</button>
+                                                        <span style="min-width:60px;text-align:center;">
+                                                            { move || format!("{}/{}", current_match_index.get().map(|i| i + 1).unwrap_or(0), match_count.get()) }
+                                                        </span>
+                                                        <button 
+                                                            on:click=go_to_next
+                                                            style="padding:4px 8px;border:1px solid #ddd;border-radius:4px;background:#fff;cursor:pointer;font-size:12px;"
+                                                            disabled=move || match_count.get() == 0
+                                                        >"Next ▶"</button>
+                                                    </div>
+                                                </Show>
+                                            </div>
                                         </div>
                                         <div style="padding:0;flex:1;overflow:auto;background:#0b1021;">
-                                            <pre style="margin:0;padding:12px;white-space:pre-wrap;overflow:auto;color:#d6e1ff;text-align:left;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, &quot;Liberation Mono&quot;, &quot;Courier New&quot;, monospace;" inner_html=highlighted_logs_html></pre>
+                                            <pre 
+                                                node_ref=content_ref
+                                                style="margin:0;padding:12px;white-space:pre-wrap;overflow:auto;color:#d6e1ff;text-align:left;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, &quot;Liberation Mono&quot;, &quot;Courier New&quot;, monospace;" 
+                                                inner_html=highlighted_logs_html
+                                            ></pre>
                                         </div>
                                     </div>
                                 </div>
