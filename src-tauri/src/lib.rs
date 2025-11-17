@@ -74,11 +74,22 @@ pub struct ResourceRef {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ContainerStatus {
+    pub name: String,
+    pub ready: bool,
+    pub state: String, // "running", "waiting", "terminated", "init"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>, // reason when terminated
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct ResourceSummary {
     pub reference: ResourceRef,
     pub labels: serde_json::Value,
     pub annotations: serde_json::Value,
     pub creation_timestamp: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub container_statuses: Option<Vec<ContainerStatus>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -140,6 +151,82 @@ fn summarize_dynamic(obj: &DynamicObject, gvk: &GroupVersionKind) -> ResourceSum
         Some(m) => serde_json::to_value(m).unwrap_or(serde_json::Value::Null),
         None => serde_json::Value::Null,
     };
+    
+    // Extract container statuses for Pods
+    let container_statuses = if gvk.kind == "Pod" && gvk.group.is_empty() {
+        if let Some(status) = obj.data.get("status") {
+            let mut statuses = Vec::new();
+            
+            // Extract init container statuses
+            if let Some(init_containers) = status.get("initContainerStatuses").and_then(|v| v.as_array()) {
+                for container in init_containers {
+                    if let Some(name) = container.get("name").and_then(|v| v.as_str()) {
+                        let ready = container.get("ready").and_then(|v| v.as_bool()).unwrap_or(false);
+                        let (state, reason) = if container.get("state").is_some() {
+                            if container.get("state").and_then(|s| s.get("waiting")).is_some() {
+                                ("init", None)
+                            } else if container.get("state").and_then(|s| s.get("running")).is_some() {
+                                ("running", None)
+                            } else if let Some(terminated) = container.get("state").and_then(|s| s.get("terminated")) {
+                                let reason = terminated.get("reason").and_then(|v| v.as_str()).map(|s| s.to_string());
+                                ("terminated", reason)
+                            } else {
+                                ("unknown", None)
+                            }
+                        } else {
+                            ("unknown", None)
+                        };
+                        statuses.push(ContainerStatus {
+                            name: name.to_string(),
+                            ready,
+                            state: state.to_string(),
+                            reason,
+                        });
+                    }
+                }
+            }
+            
+            // Extract regular container statuses
+            if let Some(containers) = status.get("containerStatuses").and_then(|v| v.as_array()) {
+                for container in containers {
+                    if let Some(name) = container.get("name").and_then(|v| v.as_str()) {
+                        let ready = container.get("ready").and_then(|v| v.as_bool()).unwrap_or(false);
+                        let (state, reason) = if container.get("state").is_some() {
+                            if container.get("state").and_then(|s| s.get("waiting")).is_some() {
+                                ("waiting", None)
+                            } else if container.get("state").and_then(|s| s.get("running")).is_some() {
+                                ("running", None)
+                            } else if let Some(terminated) = container.get("state").and_then(|s| s.get("terminated")) {
+                                let reason = terminated.get("reason").and_then(|v| v.as_str()).map(|s| s.to_string());
+                                ("terminated", reason)
+                            } else {
+                                ("unknown", None)
+                            }
+                        } else {
+                            ("unknown", None)
+                        };
+                        statuses.push(ContainerStatus {
+                            name: name.to_string(),
+                            ready,
+                            state: state.to_string(),
+                            reason,
+                        });
+                    }
+                }
+            }
+            
+            if !statuses.is_empty() {
+                Some(statuses)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    
     ResourceSummary {
         reference: ResourceRef {
             group: gvk.group.clone(),
@@ -151,6 +238,7 @@ fn summarize_dynamic(obj: &DynamicObject, gvk: &GroupVersionKind) -> ResourceSum
         labels,
         annotations,
         creation_timestamp: meta.creation_timestamp.map(|t| t.0.to_rfc3339()),
+        container_statuses,
     }
 }
 

@@ -201,11 +201,22 @@ struct ResourceRef {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+struct ContainerStatus {
+    name: String,
+    ready: bool,
+    state: String,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct ResourceSummary {
     reference: ResourceRef,
     labels: serde_json::Value,
     annotations: serde_json::Value,
     creation_timestamp: Option<String>,
+    #[serde(default)]
+    container_statuses: Option<Vec<ContainerStatus>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -379,6 +390,82 @@ pub fn App() -> impl IntoView {
                         .get("creationTimestamp")
                         .and_then(|x| x.as_str())
                         .map(|s| s.to_string());
+                    
+                    // Extract container statuses for Pods
+                    let container_statuses = if kind == "Pod" && group.is_empty() {
+                        if let Some(status) = item.get("status") {
+                            let mut statuses = Vec::new();
+                            
+                            // Extract init container statuses
+                            if let Some(init_containers) = status.get("initContainerStatuses").and_then(|v| v.as_array()) {
+                                for container in init_containers {
+                                    if let Some(name) = container.get("name").and_then(|v| v.as_str()) {
+                                        let ready = container.get("ready").and_then(|v| v.as_bool()).unwrap_or(false);
+                                        let (state, reason) = if container.get("state").is_some() {
+                                            if container.get("state").and_then(|s| s.get("waiting")).is_some() {
+                                                ("init", None)
+                                            } else if container.get("state").and_then(|s| s.get("running")).is_some() {
+                                                ("running", None)
+                                            } else if let Some(terminated) = container.get("state").and_then(|s| s.get("terminated")) {
+                                                let reason = terminated.get("reason").and_then(|v| v.as_str()).map(|s| s.to_string());
+                                                ("terminated", reason)
+                                            } else {
+                                                ("unknown", None)
+                                            }
+                                        } else {
+                                            ("unknown", None)
+                                        };
+                                        statuses.push(ContainerStatus {
+                                            name: name.to_string(),
+                                            ready,
+                                            state: state.to_string(),
+                                            reason,
+                                        });
+                                    }
+                                }
+                            }
+                            
+                            // Extract regular container statuses
+                            if let Some(containers) = status.get("containerStatuses").and_then(|v| v.as_array()) {
+                                for container in containers {
+                                    if let Some(name) = container.get("name").and_then(|v| v.as_str()) {
+                                        let ready = container.get("ready").and_then(|v| v.as_bool()).unwrap_or(false);
+                                        let (state, reason) = if container.get("state").is_some() {
+                                            if container.get("state").and_then(|s| s.get("waiting")).is_some() {
+                                                ("waiting", None)
+                                            } else if container.get("state").and_then(|s| s.get("running")).is_some() {
+                                                ("running", None)
+                                            } else if let Some(terminated) = container.get("state").and_then(|s| s.get("terminated")) {
+                                                let reason = terminated.get("reason").and_then(|v| v.as_str()).map(|s| s.to_string());
+                                                ("terminated", reason)
+                                            } else {
+                                                ("unknown", None)
+                                            }
+                                        } else {
+                                            ("unknown", None)
+                                        };
+                                        statuses.push(ContainerStatus {
+                                            name: name.to_string(),
+                                            ready,
+                                            state: state.to_string(),
+                                            reason,
+                                        });
+                                    }
+                                }
+                            }
+                            
+                            if !statuses.is_empty() {
+                                Some(statuses)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    
                     let rs = ResourceSummary {
                         reference: ResourceRef {
                             group: group.clone(),
@@ -390,6 +477,7 @@ pub fn App() -> impl IntoView {
                         labels,
                         annotations,
                         creation_timestamp,
+                        container_statuses,
                     };
                     // mutate overview incrementally
                     if let Some(mut ov) = overview.get_untracked() {
@@ -820,28 +908,95 @@ pub fn App() -> impl IntoView {
                                                         } else { false }
                                                     };
                                                     let r = item.reference.clone();
+                                                    let container_statuses = item.container_statuses.clone();
+                                                    // Pre-build container status views outside the closure
+                                                    let container_status_views: Vec<_> = if is_pod {
+                                                        container_statuses.as_ref().map(|statuses| {
+                                                            statuses.iter().map(|cs| {
+                                                                let container_name = cs.name.clone();
+                                                                let container_state = cs.state.clone();
+                                                                let container_ready = cs.ready;
+                                                                let container_reason = cs.reason.clone();
+                                                                // Determine color: green for ready/Completed, red for error/crash, yellow for init/waiting
+                                                                let (bg_color, text_color) = if container_state == "init" || container_state == "waiting" {
+                                                                    ("#ffd700", "#333") // yellow
+                                                                } else if container_ready && container_state == "running" {
+                                                                    ("#28a745", "#fff") // green
+                                                                } else if container_state == "terminated" {
+                                                                    // If terminated, check reason: Completed = green, otherwise red
+                                                                    if let Some(ref reason) = container_reason {
+                                                                        if reason == "Completed" {
+                                                                            ("#28a745", "#fff") // green
+                                                                        } else {
+                                                                            ("#dc3545", "#fff") // red
+                                                                        }
+                                                                    } else {
+                                                                        ("#dc3545", "#fff") // red (no reason)
+                                                                    }
+                                                                } else {
+                                                                    ("#dc3545", "#fff") // red
+                                                                };
+                                                                // Display state with reason if terminated
+                                                                let display_text = if container_state == "terminated" {
+                                                                    if let Some(reason) = container_reason {
+                                                                        format!("{}: {} ({})", container_name, container_state, reason)
+                                                                    } else {
+                                                                        format!("{}: {}", container_name, container_state)
+                                                                    }
+                                                                } else {
+                                                                    format!("{}: {}", container_name, container_state)
+                                                                };
+                                                                view! {
+                                                                    <span style=format!("display:inline-block;padding:2px 6px;border-radius:4px;background:{};color:{};font-size:10px;white-space:nowrap;", bg_color, text_color)>
+                                                                        { display_text }
+                                                                    </span>
+                                                                }
+                                                            }).collect::<Vec<_>>()
+                                                        }).unwrap_or_default()
+                                                    } else {
+                                                        Vec::new()
+                                                    };
                                                     view! {
                                                         <tr>
-                                                            <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:middle;">{ ns }</td>
-                                                            <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:middle;">
-                                                                <code style="display:inline-block;vertical-align:middle;">{ name.clone() }</code>
-                                                                <Show when=move || is_default_sc>
-                                                                    <span style="margin-left:8px;padding:1px 6px;border-radius:10px;background:#eef;color:#335;font-size:12px;display:inline-block;vertical-align:middle;">"default"</span>
-                                                                </Show>
+                                                            <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top;">{ ns }</td>
+                                                            <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top;min-width:300px;">
+                                                                <div style="display:flex;flex-direction:column;gap:4px;">
+                                                                    <div style="line-height:1.5;">
+                                                                        <code style="display:inline-block;vertical-align:middle;">{ name.clone() }</code>
+                                                                        <Show when=move || is_default_sc>
+                                                                            <span style="margin-left:8px;padding:1px 6px;border-radius:10px;background:#eef;color:#335;font-size:12px;display:inline-block;vertical-align:middle;">"default"</span>
+                                                                        </Show>
+                                                                    </div>
+                                                                    { if !container_status_views.is_empty() {
+                                                                        view! {
+                                                                            <div style="display:flex;flex-wrap:wrap;gap:3px;margin-top:2px;line-height:1.4;">
+                                                                                { container_status_views }
+                                                                            </div>
+                                                                        }.into_view()
+                                                                    } else {
+                                                                        view! {
+                                                                            <div style="display:flex;flex-wrap:wrap;gap:3px;margin-top:2px;">
+                                                                                { Vec::<leptos::prelude::View<_>>::new() }
+                                                                            </div>
+                                                                        }.into_view()
+                                                                    }}
+                                                                </div>
                                                             </td>
-                                                            <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:middle;">{ created }</td>
-                                                            <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:middle;">
-                                                                <button on:click={
-                                                                    let rr = r.clone();
-                                                                    move |_| do_describe(rr.clone())
-                                                                }>"Describe"</button>
-                                                                <Show when=move || is_pod>
-                                                                    <button style="margin-left:6px" on:click={
-                                                                        let ns2 = item.reference.namespace.clone().unwrap_or_default();
-                                                                        let name2 = item.reference.name.clone();
-                                                                        move |_| do_logs(ns2.clone(), name2.clone())
-                                                                    }>"Logs"</button>
-                                                                </Show>
+                                                            <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top;">{ created }</td>
+                                                            <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top;white-space:nowrap;">
+                                                                <div style="display:flex;gap:6px;align-items:flex-start;">
+                                                                    <button on:click={
+                                                                        let rr = r.clone();
+                                                                        move |_| do_describe(rr.clone())
+                                                                    }>"Describe"</button>
+                                                                    <Show when=move || is_pod>
+                                                                        <button on:click={
+                                                                            let ns2 = item.reference.namespace.clone().unwrap_or_default();
+                                                                            let name2 = item.reference.name.clone();
+                                                                            move |_| do_logs(ns2.clone(), name2.clone())
+                                                                        }>"Logs"</button>
+                                                                    </Show>
+                                                                </div>
                                                             </td>
                                                         </tr>
                                                     }
