@@ -93,15 +93,15 @@ fn DescribeContent(
     };
 
     view! {
-        <div style="display:flex;flex-direction:column;height:100%;" on:keydown=handle_keydown>
-            <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid #eee;">
+        <div style="display:flex;flex-direction:column;height:100%;min-height:0;" on:keydown=handle_keydown>
+            <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid #eee;flex-shrink:0;">
                 <h3 style="margin:0;font-size:14px;color:#333">"Describe"</h3>
                 <div style="display:flex;gap:8px;">
                     <button on:click=do_copy>"Copy"</button>
                     <button on:click=move |_| set_detail.set(None)>"Close"</button>
                 </div>
             </div>
-            <div style="padding:8px 12px;border-bottom:1px solid #eee;background:#f5f5f5;">
+            <div style="padding:8px 12px;border-bottom:1px solid #eee;background:#f5f5f5;flex-shrink:0;">
                 <input
                     node_ref=search_input_ref
                     type="text"
@@ -111,8 +111,8 @@ fn DescribeContent(
                     style="width:100%;padding:6px 10px;border:1px solid #ddd;border-radius:4px;font-size:13px;"
                 />
             </div>
-            <div style="padding:0;flex:1;overflow:auto;background:#0b1021;">
-                <pre style="margin:0;padding:12px;white-space:pre;overflow:auto;color:#d6e1ff;text-align:left;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace;" inner_html=highlighted_text_html></pre>
+            <div style="padding:0;flex:1;overflow-y:auto;overflow-x:auto;background:#0b1021;min-height:0;">
+                <pre style="margin:0;padding:12px;white-space:pre;overflow:visible;color:#d6e1ff;text-align:left;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace;" inner_html=highlighted_text_html></pre>
             </div>
         </div>
     }
@@ -1448,8 +1448,12 @@ pub fn App() -> impl IntoView {
                                                                 let container_state = cs.state.clone();
                                                                 let container_ready = cs.ready;
                                                                 let container_reason = cs.reason.clone();
-                                                                // Determine color: green for ready/Completed, red for error/crash, yellow for init/waiting
-                                                                let (bg_color, text_color) = if container_state == "init" || container_state == "waiting" {
+                                                                // Determine color based on container name and state
+                                                                let (bg_color, text_color) = if container_name == "main" && container_state == "running" {
+                                                                    ("#ffd700", "#333") // yellow for main container running
+                                                                } else if container_state.is_empty() || container_state == "unknown" {
+                                                                    ("#b3d9ff", "#333") // light blue for no state/not init yet
+                                                                } else if container_state == "init" || container_state == "waiting" {
                                                                     ("#ffd700", "#333") // yellow
                                                                 } else if container_ready && container_state == "running" {
                                                                     ("#28a745", "#fff") // green
