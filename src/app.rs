@@ -210,6 +210,14 @@ struct ContainerStatus {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+struct ServicePort {
+    port: i64,
+    target_port: Option<String>,
+    protocol: Option<String>,
+    name: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct ResourceSummary {
     reference: ResourceRef,
     labels: serde_json::Value,
@@ -217,6 +225,10 @@ struct ResourceSummary {
     creation_timestamp: Option<String>,
     #[serde(default)]
     container_statuses: Option<Vec<ContainerStatus>>,
+    #[serde(default)]
+    service_ports: Option<Vec<ServicePort>>,
+    #[serde(default)]
+    service_type: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -247,6 +259,7 @@ pub fn App() -> impl IntoView {
     let (current_ctx, set_current_ctx) = signal::<Option<String>>(None);
     let (detail, set_detail) = signal::<Option<serde_json::Value>>(None);
     let (logs, set_logs) = signal::<Option<String>>(None);
+    let (logs_container, set_logs_container) = signal::<Option<String>>(None);
     // store last request state to prevent overlap
     // request state to avoid overlapping loads and drop stale results
     let (is_fetching, set_is_fetching) = signal(false);
@@ -466,6 +479,51 @@ pub fn App() -> impl IntoView {
                         None
                     };
                     
+                    // Extract service ports and type for Services
+                    let (service_ports, service_type) = if kind == "Service" && group.is_empty() {
+                        let mut ports = Vec::new();
+                        let mut svc_type: Option<String> = None;
+                        
+                        if let Some(spec) = item.get("spec") {
+                            // Extract service type
+                            if let Some(typ) = spec.get("type").and_then(|v| v.as_str()) {
+                                svc_type = Some(typ.to_string());
+                            }
+                            
+                            // Extract ports
+                            if let Some(ports_array) = spec.get("ports").and_then(|v| v.as_array()) {
+                                for port_obj in ports_array {
+                                    let port = port_obj.get("port").and_then(|v| v.as_i64()).unwrap_or(0);
+                                    let target_port = port_obj.get("targetPort").and_then(|v| {
+                                        if let Some(s) = v.as_str() {
+                                            Some(s.to_string())
+                                        } else if let Some(n) = v.as_i64() {
+                                            Some(n.to_string())
+                                        } else {
+                                            None
+                                        }
+                                    });
+                                    let protocol = port_obj.get("protocol").and_then(|v| v.as_str()).map(|s| s.to_string());
+                                    let name = port_obj.get("name").and_then(|v| v.as_str()).map(|s| s.to_string());
+                                    ports.push(ServicePort {
+                                        port,
+                                        target_port,
+                                        protocol,
+                                        name,
+                                    });
+                                }
+                            }
+                        }
+                        
+                        if !ports.is_empty() {
+                            (Some(ports), svc_type)
+                        } else {
+                            (None, svc_type)
+                        }
+                    } else {
+                        (None, None)
+                    };
+                    
                     let rs = ResourceSummary {
                         reference: ResourceRef {
                             group: group.clone(),
@@ -478,6 +536,8 @@ pub fn App() -> impl IntoView {
                         annotations,
                         creation_timestamp,
                         container_statuses,
+                        service_ports,
+                        service_type,
                     };
                     // mutate overview incrementally
                     if let Some(mut ov) = overview.get_untracked() {
@@ -626,8 +686,9 @@ pub fn App() -> impl IntoView {
         });
     };
 
-    let do_logs = move |ns: String, name: String| {
+    let do_logs = move |ns: String, name: String, container: Option<String>| {
         set_logs.set(None);
+        set_logs_container.set(container.clone());
         spawn_local(async move {
             #[derive(Serialize)]
             struct LogArgs {
@@ -646,7 +707,7 @@ pub fn App() -> impl IntoView {
                 args: LogArgs {
                     namespace: ns.clone(),
                     name: name.clone(),
-                    container: None,
+                    container: container.clone(),
                     tail_lines: Some(200),
                     previous: Some(false),
                     timeout_secs: Some(5),
@@ -883,12 +944,23 @@ pub fn App() -> impl IntoView {
                                     <div>
                                         <table style="width:100%;border-collapse:collapse;">
                                             <thead>
-                                                <tr>
-                                                    <th style="text-align:left;border-bottom:1px solid #ddd;padding:8px 12px;vertical-align:middle;">"Namespace"</th>
-                                                    <th style="text-align:left;border-bottom:1px solid #ddd;padding:8px 12px;vertical-align:middle;">"Name"</th>
-                                                    <th style="text-align:left;border-bottom:1px solid #ddd;padding:8px 12px;vertical-align:middle;">"Created"</th>
-                                                    <th style="text-align:left;border-bottom:1px solid #ddd;padding:8px 12px;vertical-align:middle;">"Actions"</th>
-                                                </tr>
+                                                { move || {
+                                                    let is_service = fr_items.get().first().map(|item| {
+                                                        item.reference.kind == "Service" && item.reference.group.is_empty()
+                                                    }).unwrap_or(false);
+                                                    view! {
+                                                        <tr>
+                                                            <th style="text-align:left;border-bottom:1px solid #ddd;padding:8px 12px;vertical-align:middle;">"Namespace"</th>
+                                                            <th style="text-align:left;border-bottom:1px solid #ddd;padding:8px 12px;vertical-align:middle;">"Name"</th>
+                                                            <Show when=move || is_service>
+                                                                <th style="text-align:left;border-bottom:1px solid #ddd;padding:8px 12px;vertical-align:middle;">"Port"</th>
+                                                                <th style="text-align:left;border-bottom:1px solid #ddd;padding:8px 12px;vertical-align:middle;">"Type"</th>
+                                                            </Show>
+                                                            <th style="text-align:left;border-bottom:1px solid #ddd;padding:8px 12px;vertical-align:middle;">"Created"</th>
+                                                            <th style="text-align:left;border-bottom:1px solid #ddd;padding:8px 12px;vertical-align:middle;">"Actions"</th>
+                                                        </tr>
+                                                    }
+                                                }}
                                             </thead>
                                             <tbody>
                                                 { fr_items.get().into_iter().map(|item| {
@@ -909,6 +981,49 @@ pub fn App() -> impl IntoView {
                                                     };
                                                     let r = item.reference.clone();
                                                     let container_statuses = item.container_statuses.clone();
+                                                    let pod_namespace = item.reference.namespace.clone().unwrap_or_default();
+                                                    let pod_name = item.reference.name.clone();
+                                                    let is_service = item.reference.kind == "Service" && item.reference.group.is_empty();
+                                                    let service_ports = item.service_ports.clone();
+                                                    let service_type = item.service_type.clone();
+                                                    // Pre-build service port views outside the closure
+                                                    let service_port_views: Vec<_> = if is_service {
+                                                        service_ports.as_ref().map(|ports| {
+                                                            ports.iter().map(|p| {
+                                                                let port_display = if let Some(name) = &p.name {
+                                                                    format!("{}:{}", name, p.port)
+                                                                } else {
+                                                                    p.port.to_string()
+                                                                };
+                                                                let target_port_text = p.target_port.as_ref().map(|tp| format!("→{}", tp));
+                                                                let protocol_display = p.protocol.as_ref().cloned().unwrap_or_else(|| "TCP".to_string());
+                                                                view! {
+                                                                    <div style="font-size:11px;line-height:1.4;">
+                                                                        <span style="font-weight:500;">{ port_display }</span>
+                                                                        { if let Some(tp_text) = target_port_text {
+                                                                            view! { <span style="color:#666;margin-left:4px;">{ tp_text }</span> }
+                                                                        } else {
+                                                                            view! { <span style="color:#666;margin-left:4px;">{ String::new() }</span> }
+                                                                        }}
+                                                                        <span style="color:#999;margin-left:4px;font-size:10px;">{ protocol_display }</span>
+                                                                    </div>
+                                                                }
+                                                            }).collect()
+                                                        }).unwrap_or_default()
+                                                    } else {
+                                                        Vec::new()
+                                                    };
+                                                    // Pre-build service port and type views outside the closure
+                                                    let service_port_cell = if is_service {
+                                                        service_port_views.clone()
+                                                    } else {
+                                                        Vec::new()
+                                                    };
+                                                    let service_type_cell = if is_service {
+                                                        service_type.clone().unwrap_or_else(|| "-".to_string())
+                                                    } else {
+                                                        String::new()
+                                                    };
                                                     // Pre-build container status views outside the closure
                                                     let container_status_views: Vec<_> = if is_pod {
                                                         container_statuses.as_ref().map(|statuses| {
@@ -946,8 +1061,18 @@ pub fn App() -> impl IntoView {
                                                                 } else {
                                                                     format!("{}: {}", container_name, container_state)
                                                                 };
+                                                                // Prepare click handler for container logs
+                                                                let ns_for_logs = pod_namespace.clone();
+                                                                let pod_name_for_logs = pod_name.clone();
+                                                                let container_name_for_logs = container_name.clone();
                                                                 view! {
-                                                                    <span style=format!("display:inline-block;padding:2px 6px;border-radius:4px;background:{};color:{};font-size:10px;white-space:nowrap;", bg_color, text_color)>
+                                                                    <span 
+                                                                        style=format!("display:inline-block;padding:2px 6px;border-radius:4px;background:{};color:{};font-size:10px;white-space:nowrap;cursor:pointer;", bg_color, text_color)
+                                                                        on:click=move |_| {
+                                                                            do_logs(ns_for_logs.clone(), pod_name_for_logs.clone(), Some(container_name_for_logs.clone()));
+                                                                        }
+                                                                        title="点击查看日志"
+                                                                    >
                                                                         { display_text }
                                                                     </span>
                                                                 }
@@ -982,6 +1107,31 @@ pub fn App() -> impl IntoView {
                                                                     }}
                                                                 </div>
                                                             </td>
+                                                            { if is_service {
+                                                                let port_views = service_port_cell.clone();
+                                                                let svc_type = service_type_cell.clone();
+                                                                view! {
+                                                                    <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top;max-width:300px;">
+                                                                        <div style="display:flex;flex-direction:column;gap:2px;max-height:150px;overflow-y:auto;">
+                                                                            { port_views }
+                                                                        </div>
+                                                                    </td>
+                                                                    <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top;">
+                                                                        { svc_type }
+                                                                    </td>
+                                                                }
+                                                            } else {
+                                                                view! {
+                                                                    <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top;max-width:300px;">
+                                                                        <div style="display:flex;flex-direction:column;gap:2px;max-height:150px;overflow-y:auto;">
+                                                                            { Vec::<leptos::prelude::View<_>>::new() }
+                                                                        </div>
+                                                                    </td>
+                                                                    <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top;">
+                                                                        { String::new() }
+                                                                    </td>
+                                                                }
+                                                            }}
                                                             <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top;">{ created }</td>
                                                             <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top;white-space:nowrap;">
                                                                 <div style="display:flex;gap:6px;align-items:flex-start;">
@@ -993,7 +1143,7 @@ pub fn App() -> impl IntoView {
                                                                         <button on:click={
                                                                             let ns2 = item.reference.namespace.clone().unwrap_or_default();
                                                                             let name2 = item.reference.name.clone();
-                                                                            move |_| do_logs(ns2.clone(), name2.clone())
+                                                                            move |_| do_logs(ns2.clone(), name2.clone(), None)
                                                                         }>"Logs"</button>
                                                                     </Show>
                                                                 </div>
@@ -1030,14 +1180,29 @@ pub fn App() -> impl IntoView {
                         { move || {
                             let on_close = {
                                 let set_logs = set_logs.clone();
-                                move |_| set_logs.set(None)
+                                let set_logs_container = set_logs_container.clone();
+                                move |_| {
+                                    set_logs.set(None);
+                                    set_logs_container.set(None);
+                                }
                             };
                             view! {
                                 <div style="position:fixed;inset:0;background:rgba(0,0,0,0.45);display:flex;align-items:center;justify-content:center;z-index:1000;" on:click=on_close>
                                     <div style="background:#fff;max-width:80vw;max-height:80vh;width:900px;border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,0.2);display:flex;flex-direction:column;overflow:hidden;" on:click=move |e| e.stop_propagation()>
                                         <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid #eee;">
-                                            <h3 style="margin:0;font-size:14px;color:#333">"Logs"</h3>
-                                            <button on:click=move |_| set_logs.set(None)>"Close"</button>
+                                            <h3 style="margin:0;font-size:14px;color:#333">
+                                                { move || {
+                                                    if let Some(container) = logs_container.get() {
+                                                        format!("Logs - {}", container)
+                                                    } else {
+                                                        "Logs".to_string()
+                                                    }
+                                                }}
+                                            </h3>
+                                            <button on:click=move |_| {
+                                                set_logs.set(None);
+                                                set_logs_container.set(None);
+                                            }>"Close"</button>
                                         </div>
                                         <div style="padding:0;flex:1;overflow:auto;background:#0b1021;">
                                             <pre style="margin:0;padding:12px;white-space:pre-wrap;overflow:auto;color:#d6e1ff;text-align:left;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, &quot;Liberation Mono&quot;, &quot;Courier New&quot;, monospace;">{ move || logs.get().unwrap_or_default() }</pre>

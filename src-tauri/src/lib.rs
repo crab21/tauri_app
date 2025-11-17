@@ -83,6 +83,14 @@ pub struct ContainerStatus {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ServicePort {
+    pub port: i64,
+    pub target_port: Option<String>, // Can be string or number
+    pub protocol: Option<String>,
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct ResourceSummary {
     pub reference: ResourceRef,
     pub labels: serde_json::Value,
@@ -90,6 +98,10 @@ pub struct ResourceSummary {
     pub creation_timestamp: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub container_statuses: Option<Vec<ContainerStatus>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_ports: Option<Vec<ServicePort>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -227,6 +239,51 @@ fn summarize_dynamic(obj: &DynamicObject, gvk: &GroupVersionKind) -> ResourceSum
         None
     };
     
+    // Extract service ports and type for Services
+    let (service_ports, service_type) = if gvk.kind == "Service" && gvk.group.is_empty() {
+        let mut ports = Vec::new();
+        let mut svc_type: Option<String> = None;
+        
+        if let Some(spec) = obj.data.get("spec") {
+            // Extract service type
+            if let Some(typ) = spec.get("type").and_then(|v| v.as_str()) {
+                svc_type = Some(typ.to_string());
+            }
+            
+            // Extract ports
+            if let Some(ports_array) = spec.get("ports").and_then(|v| v.as_array()) {
+                for port_obj in ports_array {
+                    let port = port_obj.get("port").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let target_port = port_obj.get("targetPort").and_then(|v| {
+                        if let Some(s) = v.as_str() {
+                            Some(s.to_string())
+                        } else if let Some(n) = v.as_i64() {
+                            Some(n.to_string())
+                        } else {
+                            None
+                        }
+                    });
+                    let protocol = port_obj.get("protocol").and_then(|v| v.as_str()).map(|s| s.to_string());
+                    let name = port_obj.get("name").and_then(|v| v.as_str()).map(|s| s.to_string());
+                    ports.push(ServicePort {
+                        port,
+                        target_port,
+                        protocol,
+                        name,
+                    });
+                }
+            }
+        }
+        
+        if !ports.is_empty() {
+            (Some(ports), svc_type)
+        } else {
+            (None, svc_type)
+        }
+    } else {
+        (None, None)
+    };
+    
     ResourceSummary {
         reference: ResourceRef {
             group: gvk.group.clone(),
@@ -239,6 +296,8 @@ fn summarize_dynamic(obj: &DynamicObject, gvk: &GroupVersionKind) -> ResourceSum
         annotations,
         creation_timestamp: meta.creation_timestamp.map(|t| t.0.to_rfc3339()),
         container_statuses,
+        service_ports,
+        service_type,
     }
 }
 
