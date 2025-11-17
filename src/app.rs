@@ -1,4 +1,4 @@
-use leptos::ev::MouseEvent;
+use leptos::ev::{KeyboardEvent, MouseEvent};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde::{Deserialize, Serialize};
@@ -9,6 +9,9 @@ fn DescribeContent(
     detail: ReadSignal<Option<serde_json::Value>>,
     set_detail: WriteSignal<Option<serde_json::Value>>,
 ) -> impl IntoView {
+    let (search_query, set_search_query) = signal::<String>(String::new());
+    let search_input_ref = NodeRef::<leptos::html::Input>::new();
+    
     let yaml_text = move || match detail.get() {
         Some(v) => {
             let json_pretty = serde_json::to_value(v).unwrap_or(serde_json::json!({}));
@@ -18,6 +21,53 @@ fn DescribeContent(
             }
         }
         None => String::new(),
+    };
+
+    // Highlight text with search query - returns HTML string
+    let highlighted_text_html = move || {
+        let text = yaml_text();
+        let query = search_query.get();
+        if query.is_empty() {
+            return text;
+        }
+        
+        let query_lower = query.to_lowercase();
+        let text_lower = text.to_lowercase();
+        let mut result = String::new();
+        let mut last_end = 0;
+        let mut search_start = 0;
+        
+        // Find all matches and build HTML
+        while let Some(pos) = text_lower[search_start..].find(&query_lower) {
+            let actual_pos = search_start + pos;
+            let end_pos = actual_pos + query.len();
+            
+            // Add text before match (escape HTML)
+            if actual_pos > last_end {
+                let before = &text[last_end..actual_pos];
+                result.push_str(&before.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;"));
+            }
+            
+            // Add highlighted match
+            let matched = &text[actual_pos..end_pos];
+            let escaped = matched.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+            result.push_str(&format!("<mark style=\"background-color:#ffeb3b;color:#000;padding:0 2px;\">{}</mark>", escaped));
+            
+            last_end = end_pos;
+            search_start = actual_pos + 1;
+        }
+        
+        // Add remaining text
+        if last_end < text.len() {
+            let remaining = &text[last_end..];
+            result.push_str(&remaining.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;"));
+        }
+        
+        if result.is_empty() {
+            text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+        } else {
+            result
+        }
     };
 
     let do_copy = move |_| {
@@ -30,16 +80,40 @@ fn DescribeContent(
         });
     };
 
+    let handle_keydown = move |e: KeyboardEvent| {
+        // Check for Command+F (Mac) or Ctrl+F (Windows/Linux)
+        let meta = e.ctrl_key() || e.meta_key();
+        if meta && e.key_code() == 70 {
+            e.prevent_default();
+            if let Some(input) = search_input_ref.get() {
+                let _ = input.focus();
+                let _ = input.select();
+            }
+        }
+    };
+
     view! {
-        <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid #eee;">
-            <h3 style="margin:0;font-size:14px;color:#333">"Describe"</h3>
-            <div style="display:flex;gap:8px;">
-                <button on:click=do_copy>"Copy"</button>
-                <button on:click=move |_| set_detail.set(None)>"Close"</button>
+        <div style="display:flex;flex-direction:column;height:100%;" on:keydown=handle_keydown>
+            <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid #eee;">
+                <h3 style="margin:0;font-size:14px;color:#333">"Describe"</h3>
+                <div style="display:flex;gap:8px;">
+                    <button on:click=do_copy>"Copy"</button>
+                    <button on:click=move |_| set_detail.set(None)>"Close"</button>
+                </div>
             </div>
-        </div>
-        <div style="padding:0;flex:1;overflow:auto;background:#0b1021;">
-            <pre style="margin:0;padding:12px;white-space:pre;overflow:auto;color:#d6e1ff;text-align:left;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace;">{ yaml_text }</pre>
+            <div style="padding:8px 12px;border-bottom:1px solid #eee;background:#f5f5f5;">
+                <input
+                    node_ref=search_input_ref
+                    type="text"
+                    placeholder="Search... (Cmd+F / Ctrl+F)"
+                    value=move || search_query.get()
+                    on:input=move |e| set_search_query.set(event_target_value(&e))
+                    style="width:100%;padding:6px 10px;border:1px solid #ddd;border-radius:4px;font-size:13px;"
+                />
+            </div>
+            <div style="padding:0;flex:1;overflow:auto;background:#0b1021;">
+                <pre style="margin:0;padding:12px;white-space:pre;overflow:auto;color:#d6e1ff;text-align:left;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace;" inner_html=highlighted_text_html></pre>
+            </div>
         </div>
     }
 }
@@ -215,6 +289,22 @@ struct ServicePort {
     target_port: Option<String>,
     protocol: Option<String>,
     name: Option<String>,
+    node_port: Option<i64>, // NodePort for NodePort type services
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct EndpointSlicePort {
+    port: Option<i64>,
+    protocol: Option<String>,
+    name: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct EndpointSliceEndpoint {
+    addresses: Vec<String>,
+    ready: Option<bool>,
+    serving: Option<bool>,
+    terminating: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -229,6 +319,41 @@ struct ResourceSummary {
     service_ports: Option<Vec<ServicePort>>,
     #[serde(default)]
     service_type: Option<String>,
+    // PV fields
+    #[serde(default)]
+    pv_capacity: Option<String>,
+    #[serde(default)]
+    pv_access_modes: Option<Vec<String>>,
+    #[serde(default)]
+    pv_reclaim_policy: Option<String>,
+    #[serde(default)]
+    pv_status: Option<String>,
+    #[serde(default)]
+    pv_claim: Option<String>,
+    #[serde(default)]
+    pv_storage_class: Option<String>,
+    #[serde(default)]
+    pv_volume_attributes_class: Option<String>,
+    #[serde(default)]
+    pv_reason: Option<String>,
+    // PVC fields
+    #[serde(default)]
+    pvc_status: Option<String>,
+    #[serde(default)]
+    pvc_volume: Option<String>,
+    #[serde(default)]
+    pvc_capacity: Option<String>,
+    #[serde(default)]
+    pvc_access_modes: Option<Vec<String>>,
+    #[serde(default)]
+    pvc_storage_class: Option<String>,
+    #[serde(default)]
+    pvc_volume_attributes_class: Option<String>,
+    // EndpointSlice fields
+    #[serde(default)]
+    endpointslice_ports: Option<Vec<EndpointSlicePort>>,
+    #[serde(default)]
+    endpointslice_endpoints: Option<Vec<EndpointSliceEndpoint>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -505,11 +630,13 @@ pub fn App() -> impl IntoView {
                                     });
                                     let protocol = port_obj.get("protocol").and_then(|v| v.as_str()).map(|s| s.to_string());
                                     let name = port_obj.get("name").and_then(|v| v.as_str()).map(|s| s.to_string());
+                                    let node_port = port_obj.get("nodePort").and_then(|v| v.as_i64());
                                     ports.push(ServicePort {
                                         port,
                                         target_port,
                                         protocol,
                                         name,
+                                        node_port,
                                     });
                                 }
                             }
@@ -519,6 +646,159 @@ pub fn App() -> impl IntoView {
                             (Some(ports), svc_type)
                         } else {
                             (None, svc_type)
+                        }
+                    } else {
+                        (None, None)
+                    };
+                    
+                    // Extract PV fields
+                    let (pv_capacity, pv_access_modes, pv_reclaim_policy, pv_status, pv_claim, pv_storage_class, pv_volume_attributes_class, pv_reason) = if kind == "PersistentVolume" && group.is_empty() {
+                        let mut capacity: Option<String> = None;
+                        let mut access_modes: Option<Vec<String>> = None;
+                        let mut reclaim_policy: Option<String> = None;
+                        let mut status: Option<String> = None;
+                        let mut claim: Option<String> = None;
+                        let mut storage_class: Option<String> = None;
+                        let mut volume_attributes_class: Option<String> = None;
+                        let mut reason: Option<String> = None;
+                        
+                        if let Some(spec) = item.get("spec") {
+                            // Capacity
+                            if let Some(cap) = spec.get("capacity").and_then(|c| c.get("storage")).and_then(|v| v.as_str()) {
+                                capacity = Some(cap.to_string());
+                            }
+                            // Access modes
+                            if let Some(modes) = spec.get("accessModes").and_then(|v| v.as_array()) {
+                                access_modes = Some(modes.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect());
+                            }
+                            // Reclaim policy
+                            if let Some(rp) = spec.get("persistentVolumeReclaimPolicy").and_then(|v| v.as_str()) {
+                                reclaim_policy = Some(rp.to_string());
+                            }
+                            // Storage class
+                            if let Some(sc) = spec.get("storageClassName").and_then(|v| v.as_str()) {
+                                storage_class = Some(sc.to_string());
+                            }
+                            // Volume attributes class
+                            if let Some(vac) = spec.get("volumeAttributesClassName").and_then(|v| v.as_str()) {
+                                volume_attributes_class = Some(vac.to_string());
+                            }
+                        }
+                        
+                        if let Some(status_obj) = item.get("status") {
+                            // Status phase
+                            if let Some(phase) = status_obj.get("phase").and_then(|v| v.as_str()) {
+                                status = Some(phase.to_string());
+                            }
+                            // Claim reference
+                            if let Some(claim_ref) = status_obj.get("claimRef") {
+                                if let Some(ns) = claim_ref.get("namespace").and_then(|v| v.as_str()) {
+                                    if let Some(name) = claim_ref.get("name").and_then(|v| v.as_str()) {
+                                        claim = Some(format!("{}/{}", ns, name));
+                                    }
+                                }
+                            }
+                            // Reason
+                            if let Some(r) = status_obj.get("reason").and_then(|v| v.as_str()) {
+                                reason = Some(r.to_string());
+                            }
+                        }
+                        
+                        (capacity, access_modes, reclaim_policy, status, claim, storage_class, volume_attributes_class, reason)
+                    } else {
+                        (None, None, None, None, None, None, None, None)
+                    };
+                    
+                    // Extract PVC fields
+                    let (pvc_status, pvc_volume, pvc_capacity, pvc_access_modes, pvc_storage_class, pvc_volume_attributes_class) = if kind == "PersistentVolumeClaim" && group.is_empty() {
+                        let mut status: Option<String> = None;
+                        let mut volume: Option<String> = None;
+                        let mut capacity: Option<String> = None;
+                        let mut access_modes: Option<Vec<String>> = None;
+                        let mut storage_class: Option<String> = None;
+                        let mut volume_attributes_class: Option<String> = None;
+                        
+                        if let Some(spec) = item.get("spec") {
+                            // Access modes
+                            if let Some(modes) = spec.get("accessModes").and_then(|v| v.as_array()) {
+                                access_modes = Some(modes.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect());
+                            }
+                            // Storage class
+                            if let Some(sc) = spec.get("storageClassName").and_then(|v| v.as_str()) {
+                                storage_class = Some(sc.to_string());
+                            }
+                            // Volume attributes class
+                            if let Some(vac) = spec.get("volumeAttributesClassName").and_then(|v| v.as_str()) {
+                                volume_attributes_class = Some(vac.to_string());
+                            }
+                            // Volume name
+                            if let Some(vol) = spec.get("volumeName").and_then(|v| v.as_str()) {
+                                volume = Some(vol.to_string());
+                            }
+                        }
+                        
+                        if let Some(status_obj) = item.get("status") {
+                            // Status phase
+                            if let Some(phase) = status_obj.get("phase").and_then(|v| v.as_str()) {
+                                status = Some(phase.to_string());
+                            }
+                            // Capacity
+                            if let Some(cap) = status_obj.get("capacity").and_then(|c| c.get("storage")).and_then(|v| v.as_str()) {
+                                capacity = Some(cap.to_string());
+                            }
+                        }
+                        
+                        (status, volume, capacity, access_modes, storage_class, volume_attributes_class)
+                    } else {
+                        (None, None, None, None, None, None)
+                    };
+                    
+                    // Extract EndpointSlice ports and endpoints
+                    let (endpointslice_ports, endpointslice_endpoints) = if kind == "EndpointSlice" && group == "discovery.k8s.io" {
+                        let mut ports = Vec::new();
+                        let mut endpoints = Vec::new();
+                        
+                        // Extract ports
+                        if let Some(ports_array) = item.get("ports").and_then(|v| v.as_array()) {
+                            for port_obj in ports_array {
+                                let port = port_obj.get("port").and_then(|v| v.as_i64());
+                                let protocol = port_obj.get("protocol").and_then(|v| v.as_str()).map(|s| s.to_string());
+                                let name = port_obj.get("name").and_then(|v| v.as_str()).map(|s| s.to_string());
+                                ports.push(EndpointSlicePort {
+                                    port,
+                                    protocol,
+                                    name,
+                                });
+                            }
+                        }
+                        
+                        // Extract endpoints
+                        if let Some(endpoints_array) = item.get("endpoints").and_then(|v| v.as_array()) {
+                            for endpoint_obj in endpoints_array {
+                                let mut addresses = Vec::new();
+                                if let Some(addresses_array) = endpoint_obj.get("addresses").and_then(|v| v.as_array()) {
+                                    for addr in addresses_array {
+                                        if let Some(addr_str) = addr.as_str() {
+                                            addresses.push(addr_str.to_string());
+                                        }
+                                    }
+                                }
+                                let ready = endpoint_obj.get("conditions").and_then(|c| c.get("ready")).and_then(|v| v.as_bool());
+                                let serving = endpoint_obj.get("conditions").and_then(|c| c.get("serving")).and_then(|v| v.as_bool());
+                                let terminating = endpoint_obj.get("conditions").and_then(|c| c.get("terminating")).and_then(|v| v.as_bool());
+                                endpoints.push(EndpointSliceEndpoint {
+                                    addresses,
+                                    ready,
+                                    serving,
+                                    terminating,
+                                });
+                            }
+                        }
+                        
+                        if !ports.is_empty() || !endpoints.is_empty() {
+                            (if !ports.is_empty() { Some(ports) } else { None }, if !endpoints.is_empty() { Some(endpoints) } else { None })
+                        } else {
+                            (None, None)
                         }
                     } else {
                         (None, None)
@@ -538,6 +818,22 @@ pub fn App() -> impl IntoView {
                         container_statuses,
                         service_ports,
                         service_type,
+                        pv_capacity,
+                        pv_access_modes,
+                        pv_reclaim_policy,
+                        pv_status,
+                        pv_claim,
+                        pv_storage_class,
+                        pv_volume_attributes_class,
+                        pv_reason,
+                        pvc_status,
+                        pvc_volume,
+                        pvc_capacity,
+                        pvc_access_modes,
+                        pvc_storage_class,
+                        pvc_volume_attributes_class,
+                        endpointslice_ports,
+                        endpointslice_endpoints,
                     };
                     // mutate overview incrementally
                     if let Some(mut ov) = overview.get_untracked() {
@@ -723,11 +1019,11 @@ pub fn App() -> impl IntoView {
             <div style="display:flex;gap:16px;align-items:flex-start;">
                 <div style="width:280px;flex:0 0 280px;border-right:1px solid #ddd;padding-right:12px;">
                     <div style="display:flex;justify-content:space-between;align-items:center;">
-                        <h2 style="margin:0;">"资源类型"</h2>
-                        <button on:click=move |_: MouseEvent| load_overview() disabled=move || loading.get()>"刷新"</button>
+                        <h2 style="margin:0;">"Resource Types"</h2>
+                        <button on:click=move |_: MouseEvent| load_overview() disabled=move || loading.get()>"Refresh"</button>
                     </div>
                     <Show when=move || loading.get()>
-                        <div style="margin-top:8px;color:#555">"加载中..."</div>
+                        <div style="margin-top:8px;color:#555">"Loading..."</div>
                     </Show>
                     <div style="margin-top:8px;display:flex;gap:8px;align-items:center;">
                         <span style="color:#555">"Context"</span>
@@ -933,7 +1229,7 @@ pub fn App() -> impl IntoView {
                     }
                 </div>
                 <div style="flex:1;min-height:400px;">
-                    <h2 style="margin-top:0;">"资源列表"</h2>
+                    <h2 style="margin-top:0;">"Resource List"</h2>
                     <Show when=move || overview.get().is_some()>
                         { move || {
                             view! {
@@ -945,18 +1241,54 @@ pub fn App() -> impl IntoView {
                                         <table style="width:100%;border-collapse:collapse;">
                                             <thead>
                                                 { move || {
-                                                    let is_service = fr_items.get().first().map(|item| {
+                                                    let items = fr_items.get();
+                                                    let is_service = items.first().map(|item| {
                                                         item.reference.kind == "Service" && item.reference.group.is_empty()
+                                                    }).unwrap_or(false);
+                                                    let is_pv = items.first().map(|item| {
+                                                        item.reference.kind == "PersistentVolume" && item.reference.group.is_empty()
+                                                    }).unwrap_or(false);
+                                                    let is_pvc = items.first().map(|item| {
+                                                        item.reference.kind == "PersistentVolumeClaim" && item.reference.group.is_empty()
+                                                    }).unwrap_or(false);
+                                                    let is_endpointslice = items.first().map(|item| {
+                                                        item.reference.kind == "EndpointSlice" && item.reference.group == "discovery.k8s.io"
                                                     }).unwrap_or(false);
                                                     view! {
                                                         <tr>
-                                                            <th style="text-align:left;border-bottom:1px solid #ddd;padding:8px 12px;vertical-align:middle;">"Namespace"</th>
+                                                            <Show when=move || !is_pv>
+                                                                <th style="text-align:left;border-bottom:1px solid #ddd;padding:8px 12px;vertical-align:middle;">"Namespace"</th>
+                                                            </Show>
                                                             <th style="text-align:left;border-bottom:1px solid #ddd;padding:8px 12px;vertical-align:middle;">"Name"</th>
+                                                            <Show when=move || is_pv>
+                                                                <th style="text-align:left;border-bottom:1px solid #ddd;padding:8px 12px;vertical-align:middle;">"Capacity"</th>
+                                                                <th style="text-align:left;border-bottom:1px solid #ddd;padding:8px 12px;vertical-align:middle;">"Access Modes"</th>
+                                                                <th style="text-align:left;border-bottom:1px solid #ddd;padding:8px 12px;vertical-align:middle;">"Reclaim Policy"</th>
+                                                                <th style="text-align:left;border-bottom:1px solid #ddd;padding:8px 12px;vertical-align:middle;">"Status"</th>
+                                                                <th style="text-align:left;border-bottom:1px solid #ddd;padding:8px 12px;vertical-align:middle;">"Claim"</th>
+                                                                <th style="text-align:left;border-bottom:1px solid #ddd;padding:8px 12px;vertical-align:middle;">"StorageClass"</th>
+                                                                <th style="text-align:left;border-bottom:1px solid #ddd;padding:8px 12px;vertical-align:middle;">"VolumeAttributesClass"</th>
+                                                                <th style="text-align:left;border-bottom:1px solid #ddd;padding:8px 12px;vertical-align:middle;">"Reason"</th>
+                                                            </Show>
+                                                            <Show when=move || is_pvc>
+                                                                <th style="text-align:left;border-bottom:1px solid #ddd;padding:8px 12px;vertical-align:middle;">"Status"</th>
+                                                                <th style="text-align:left;border-bottom:1px solid #ddd;padding:8px 12px;vertical-align:middle;">"Volume"</th>
+                                                                <th style="text-align:left;border-bottom:1px solid #ddd;padding:8px 12px;vertical-align:middle;">"Capacity"</th>
+                                                                <th style="text-align:left;border-bottom:1px solid #ddd;padding:8px 12px;vertical-align:middle;">"Access Modes"</th>
+                                                                <th style="text-align:left;border-bottom:1px solid #ddd;padding:8px 12px;vertical-align:middle;">"StorageClass"</th>
+                                                                <th style="text-align:left;border-bottom:1px solid #ddd;padding:8px 12px;vertical-align:middle;">"VolumeAttributesClass"</th>
+                                                            </Show>
                                                             <Show when=move || is_service>
                                                                 <th style="text-align:left;border-bottom:1px solid #ddd;padding:8px 12px;vertical-align:middle;">"Port"</th>
                                                                 <th style="text-align:left;border-bottom:1px solid #ddd;padding:8px 12px;vertical-align:middle;">"Type"</th>
                                                             </Show>
-                                                            <th style="text-align:left;border-bottom:1px solid #ddd;padding:8px 12px;vertical-align:middle;">"Created"</th>
+                                                            <Show when=move || is_endpointslice>
+                                                                <th style="text-align:left;border-bottom:1px solid #ddd;padding:8px 12px;vertical-align:middle;">"Ports"</th>
+                                                                <th style="text-align:left;border-bottom:1px solid #ddd;padding:8px 12px;vertical-align:middle;">"Endpoints"</th>
+                                                            </Show>
+                                                            <Show when=move || !is_pv && !is_pvc>
+                                                                <th style="text-align:left;border-bottom:1px solid #ddd;padding:8px 12px;vertical-align:middle;">"Created"</th>
+                                                            </Show>
                                                             <th style="text-align:left;border-bottom:1px solid #ddd;padding:8px 12px;vertical-align:middle;">"Actions"</th>
                                                         </tr>
                                                     }
@@ -986,8 +1318,14 @@ pub fn App() -> impl IntoView {
                                                     let is_service = item.reference.kind == "Service" && item.reference.group.is_empty();
                                                     let service_ports = item.service_ports.clone();
                                                     let service_type = item.service_type.clone();
+                                                    let is_pv = item.reference.kind == "PersistentVolume" && item.reference.group.is_empty();
+                                                    let is_pvc = item.reference.kind == "PersistentVolumeClaim" && item.reference.group.is_empty();
+                                                    let is_endpointslice = item.reference.kind == "EndpointSlice" && item.reference.group == "discovery.k8s.io";
+                                                    let endpointslice_ports = item.endpointslice_ports.clone();
+                                                    let endpointslice_endpoints = item.endpointslice_endpoints.clone();
                                                     // Pre-build service port views outside the closure
                                                     let service_port_views: Vec<_> = if is_service {
+                                                        let svc_type_clone = service_type.clone();
                                                         service_ports.as_ref().map(|ports| {
                                                             ports.iter().map(|p| {
                                                                 let port_display = if let Some(name) = &p.name {
@@ -996,12 +1334,23 @@ pub fn App() -> impl IntoView {
                                                                     p.port.to_string()
                                                                 };
                                                                 let target_port_text = p.target_port.as_ref().map(|tp| format!("→{}", tp));
+                                                                // If NodePort type and has nodePort, show it
+                                                                let node_port_text = if svc_type_clone.as_deref() == Some("NodePort") {
+                                                                    p.node_port.map(|np| format!("(NodePort:{})", np))
+                                                                } else {
+                                                                    None
+                                                                };
                                                                 let protocol_display = p.protocol.as_ref().cloned().unwrap_or_else(|| "TCP".to_string());
                                                                 view! {
                                                                     <div style="font-size:11px;line-height:1.4;">
                                                                         <span style="font-weight:500;">{ port_display }</span>
                                                                         { if let Some(tp_text) = target_port_text {
                                                                             view! { <span style="color:#666;margin-left:4px;">{ tp_text }</span> }
+                                                                        } else {
+                                                                            view! { <span style="color:#666;margin-left:4px;">{ String::new() }</span> }
+                                                                        }}
+                                                                        { if let Some(np_text) = node_port_text {
+                                                                            view! { <span style="color:#0066cc;margin-left:4px;font-weight:500;">{ np_text }</span> }
                                                                         } else {
                                                                             view! { <span style="color:#666;margin-left:4px;">{ String::new() }</span> }
                                                                         }}
@@ -1023,6 +1372,73 @@ pub fn App() -> impl IntoView {
                                                         service_type.clone().unwrap_or_else(|| "-".to_string())
                                                     } else {
                                                         String::new()
+                                                    };
+                                                    // Pre-build service type view as Vec<View> to match other branches
+                                                    let service_type_views: Vec<_> = if is_service {
+                                                        vec![view! { <div>{ service_type_cell.clone() }</div> }]
+                                                    } else {
+                                                        Vec::new()
+                                                    };
+                                                    // Pre-build EndpointSlice port views
+                                                    let endpointslice_port_views: Vec<_> = if is_endpointslice {
+                                                        endpointslice_ports.as_ref().map(|ports| {
+                                                            ports.iter().map(|p| {
+                                                                let port_display = if let Some(port_num) = p.port {
+                                                                    if let Some(name) = &p.name {
+                                                                        format!("{}:{}", name, port_num)
+                                                                    } else {
+                                                                        port_num.to_string()
+                                                                    }
+                                                                } else if let Some(name) = &p.name {
+                                                                    name.clone()
+                                                                } else {
+                                                                    "-".to_string()
+                                                                };
+                                                                let protocol_display = p.protocol.as_ref().cloned().unwrap_or_else(|| "TCP".to_string());
+                                                                view! {
+                                                                    <div style="font-size:11px;line-height:1.4;">
+                                                                        <span style="font-weight:500;">{ port_display }</span>
+                                                                        <span style="color:#999;margin-left:4px;font-size:10px;">{ protocol_display }</span>
+                                                                    </div>
+                                                                }
+                                                            }).collect()
+                                                        }).unwrap_or_default()
+                                                    } else {
+                                                        Vec::new()
+                                                    };
+                                                    // Pre-build EndpointSlice endpoint views
+                                                    let endpointslice_endpoint_views: Vec<_> = if is_endpointslice {
+                                                        endpointslice_endpoints.as_ref().map(|endpoints| {
+                                                            endpoints.iter().map(|ep| {
+                                                                let addresses_display = if ep.addresses.is_empty() {
+                                                                    "-".to_string()
+                                                                } else {
+                                                                    ep.addresses.join(", ")
+                                                                };
+                                                                let status_parts = vec![
+                                                                    ep.ready.map(|r| if r { "Ready" } else { "NotReady" }),
+                                                                    ep.serving.map(|s| if s { "Serving" } else { "NotServing" }),
+                                                                    ep.terminating.map(|t| if t { "Terminating" } else { "NotTerminating" }),
+                                                                ].into_iter().flatten().collect::<Vec<_>>();
+                                                                let status_display = if status_parts.is_empty() {
+                                                                    String::new()
+                                                                } else {
+                                                                    format!(" ({})", status_parts.join(", "))
+                                                                };
+                                                                view! {
+                                                                    <div style="font-size:11px;line-height:1.4;">
+                                                                        <span style="font-weight:500;">{ addresses_display }</span>
+                                                                        { if !status_display.is_empty() {
+                                                                            view! { <span style="color:#666;margin-left:4px;">{ status_display }</span> }
+                                                                        } else {
+                                                                            view! { <span style="color:#666;margin-left:4px;">{ String::new() }</span> }
+                                                                        }}
+                                                                    </div>
+                                                                }
+                                                            }).collect()
+                                                        }).unwrap_or_default()
+                                                    } else {
+                                                        Vec::new()
                                                     };
                                                     // Pre-build container status views outside the closure
                                                     let container_status_views: Vec<_> = if is_pod {
@@ -1071,7 +1487,7 @@ pub fn App() -> impl IntoView {
                                                                         on:click=move |_| {
                                                                             do_logs(ns_for_logs.clone(), pod_name_for_logs.clone(), Some(container_name_for_logs.clone()));
                                                                         }
-                                                                        title="点击查看日志"
+                                                                        title="Click to view logs"
                                                                     >
                                                                         { display_text }
                                                                     </span>
@@ -1081,9 +1497,169 @@ pub fn App() -> impl IntoView {
                                                     } else {
                                                         Vec::new()
                                                     };
+                                                    // Pre-build PV fields
+                                                    let pv_capacity = item.pv_capacity.clone().unwrap_or_else(|| "-".to_string());
+                                                    let pv_access_modes = item.pv_access_modes.clone().unwrap_or_default();
+                                                    let pv_access_modes_display = if pv_access_modes.is_empty() {
+                                                        "-".to_string()
+                                                    } else {
+                                                        pv_access_modes.join(",")
+                                                    };
+                                                    let pv_reclaim_policy = item.pv_reclaim_policy.clone().unwrap_or_else(|| "-".to_string());
+                                                    let pv_status = item.pv_status.clone().unwrap_or_else(|| "-".to_string());
+                                                    let pv_claim = item.pv_claim.clone().unwrap_or_else(|| "-".to_string());
+                                                    let pv_storage_class = item.pv_storage_class.clone().unwrap_or_else(|| "-".to_string());
+                                                    let pv_volume_attributes_class = item.pv_volume_attributes_class.clone().unwrap_or_else(|| "-".to_string());
+                                                    let pv_reason = item.pv_reason.clone().unwrap_or_else(|| "-".to_string());
+                                                    
+                                                    // Pre-build PVC fields
+                                                    let pvc_status = item.pvc_status.clone().unwrap_or_else(|| "-".to_string());
+                                                    let pvc_volume = item.pvc_volume.clone().unwrap_or_else(|| "-".to_string());
+                                                    let pvc_capacity = item.pvc_capacity.clone().unwrap_or_else(|| "-".to_string());
+                                                    let pvc_access_modes = item.pvc_access_modes.clone().unwrap_or_default();
+                                                    let pvc_access_modes_display = if pvc_access_modes.is_empty() {
+                                                        "-".to_string()
+                                                    } else {
+                                                        pvc_access_modes.join(",")
+                                                    };
+                                                    let pvc_storage_class = item.pvc_storage_class.clone().unwrap_or_else(|| "-".to_string());
+                                                    let pvc_volume_attributes_class = item.pvc_volume_attributes_class.clone().unwrap_or_else(|| "-".to_string());
+                                                    
+                                                    // Build conditional cells outside view! macro
+                                                    let namespace_cell_view = if !is_pv {
+                                                        Some(view! {
+                                                            <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top;">{ ns.clone() }</td>
+                                                        }.into_view())
+                                                    } else {
+                                                        None
+                                                    };
+                                                    
+                                                    let pv_cells_view = if is_pv {
+                                                        Some(view! {
+                                                            <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top;">{ pv_capacity.clone() }</td>
+                                                            <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top;max-width:150px;word-break:break-word;">{ pv_access_modes_display.clone() }</td>
+                                                            <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top;">{ pv_reclaim_policy.clone() }</td>
+                                                            <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top;">{ pv_status.clone() }</td>
+                                                            <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top;max-width:200px;word-break:break-word;">{ pv_claim.clone() }</td>
+                                                            <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top;">{ pv_storage_class.clone() }</td>
+                                                            <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top;">{ pv_volume_attributes_class.clone() }</td>
+                                                            <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top;">{ pv_reason.clone() }</td>
+                                                        }.into_view())
+                                                    } else {
+                                                        None
+                                                    };
+                                                    
+                                                    let pvc_cells_view = if is_pvc {
+                                                        Some(view! {
+                                                            <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top;">{ pvc_status.clone() }</td>
+                                                            <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top;max-width:200px;word-break:break-word;">{ pvc_volume.clone() }</td>
+                                                            <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top;">{ pvc_capacity.clone() }</td>
+                                                            <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top;max-width:150px;word-break:break-word;">{ pvc_access_modes_display.clone() }</td>
+                                                            <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top;">{ pvc_storage_class.clone() }</td>
+                                                            <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top;">{ pvc_volume_attributes_class.clone() }</td>
+                                                        }.into_view())
+                                                    } else {
+                                                        None
+                                                    };
+                                                    
+                                                    let created_cell_view = if !is_pv && !is_pvc {
+                                                        Some(view! {
+                                                            <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top;">{ created.clone() }</td>
+                                                        }.into_view())
+                                                    } else {
+                                                        None
+                                                    };
+                                                    
+                                                    // Build service cells view
+                                                    let service_cells_view = if is_service {
+                                                        Some(view! {
+                                                            <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top;max-width:300px;">
+                                                                <div style="display:flex;flex-direction:column;gap:2px;max-height:150px;overflow-y:auto;">
+                                                                    { service_port_cell.clone() }
+                                                                </div>
+                                                            </td>
+                                                            <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top;max-width:300px;">
+                                                                <div style="display:flex;flex-direction:column;gap:2px;max-height:150px;overflow-y:auto;">
+                                                                    { service_type_views.clone() }
+                                                                </div>
+                                                            </td>
+                                                        }.into_view())
+                                                    } else {
+                                                        None
+                                                    };
+                                                    
+                                                    // Build EndpointSlice cells view
+                                                    let endpointslice_cells_view = if is_endpointslice {
+                                                        Some(view! {
+                                                            <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top;max-width:300px;">
+                                                                <div style="display:flex;flex-direction:column;gap:2px;max-height:150px;overflow-y:auto;">
+                                                                    { endpointslice_port_views.clone() }
+                                                                </div>
+                                                            </td>
+                                                            <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top;max-width:300px;">
+                                                                <div style="display:flex;flex-direction:column;gap:2px;max-height:150px;overflow-y:auto;">
+                                                                    { endpointslice_endpoint_views.clone() }
+                                                                </div>
+                                                            </td>
+                                                        }.into_view())
+                                                    } else {
+                                                        None
+                                                    };
+                                                    
+                                                    // Build empty views with matching types - use same string values as Some branches
+                                                    let empty_str = "-".to_string();
+                                                    let empty_namespace_view = view! {
+                                                        <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top;display:none;">{ empty_str.clone() }</td>
+                                                    }.into_view();
+                                                    let empty_pv_view = view! {
+                                                        <td style="display:none;">{ empty_str.clone() }</td>
+                                                        <td style="display:none;">{ empty_str.clone() }</td>
+                                                        <td style="display:none;">{ empty_str.clone() }</td>
+                                                        <td style="display:none;">{ empty_str.clone() }</td>
+                                                        <td style="display:none;">{ empty_str.clone() }</td>
+                                                        <td style="display:none;">{ empty_str.clone() }</td>
+                                                        <td style="display:none;">{ empty_str.clone() }</td>
+                                                        <td style="display:none;">{ empty_str.clone() }</td>
+                                                    }.into_view();
+                                                    let empty_pvc_view = view! {
+                                                        <td style="display:none;">{ empty_str.clone() }</td>
+                                                        <td style="display:none;">{ empty_str.clone() }</td>
+                                                        <td style="display:none;">{ empty_str.clone() }</td>
+                                                        <td style="display:none;">{ empty_str.clone() }</td>
+                                                        <td style="display:none;">{ empty_str.clone() }</td>
+                                                        <td style="display:none;">{ empty_str.clone() }</td>
+                                                    }.into_view();
+                                                    let empty_created_view = view! {
+                                                        <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top;display:none;">{ empty_str.clone() }</td>
+                                                    }.into_view();
+                                                    let empty_service_view = view! {
+                                                        <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top;max-width:300px;display:none;">
+                                                            <div style="display:flex;flex-direction:column;gap:2px;max-height:150px;overflow-y:auto;">
+                                                                { Vec::<leptos::prelude::View<_>>::new() }
+                                                            </div>
+                                                        </td>
+                                                        <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top;max-width:300px;display:none;">
+                                                            <div style="display:flex;flex-direction:column;gap:2px;max-height:150px;overflow-y:auto;">
+                                                                { Vec::<leptos::prelude::View<_>>::new() }
+                                                            </div>
+                                                        </td>
+                                                    }.into_view();
+                                                    let empty_endpointslice_view = view! {
+                                                        <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top;max-width:300px;display:none;">
+                                                            <div style="display:flex;flex-direction:column;gap:2px;max-height:150px;overflow-y:auto;">
+                                                                { Vec::<leptos::prelude::View<_>>::new() }
+                                                            </div>
+                                                        </td>
+                                                        <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top;max-width:300px;display:none;">
+                                                            <div style="display:flex;flex-direction:column;gap:2px;max-height:150px;overflow-y:auto;">
+                                                                { Vec::<leptos::prelude::View<_>>::new() }
+                                                            </div>
+                                                        </td>
+                                                    }.into_view();
+                                                    
                                                     view! {
                                                         <tr>
-                                                            <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top;">{ ns }</td>
+                                                            { namespace_cell_view.unwrap_or(empty_namespace_view) }
                                                             <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top;min-width:300px;">
                                                                 <div style="display:flex;flex-direction:column;gap:4px;">
                                                                     <div style="line-height:1.5;">
@@ -1107,32 +1683,11 @@ pub fn App() -> impl IntoView {
                                                                     }}
                                                                 </div>
                                                             </td>
-                                                            { if is_service {
-                                                                let port_views = service_port_cell.clone();
-                                                                let svc_type = service_type_cell.clone();
-                                                                view! {
-                                                                    <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top;max-width:300px;">
-                                                                        <div style="display:flex;flex-direction:column;gap:2px;max-height:150px;overflow-y:auto;">
-                                                                            { port_views }
-                                                                        </div>
-                                                                    </td>
-                                                                    <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top;">
-                                                                        { svc_type }
-                                                                    </td>
-                                                                }
-                                                            } else {
-                                                                view! {
-                                                                    <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top;max-width:300px;">
-                                                                        <div style="display:flex;flex-direction:column;gap:2px;max-height:150px;overflow-y:auto;">
-                                                                            { Vec::<leptos::prelude::View<_>>::new() }
-                                                                        </div>
-                                                                    </td>
-                                                                    <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top;">
-                                                                        { String::new() }
-                                                                    </td>
-                                                                }
-                                                            }}
-                                                            <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top;">{ created }</td>
+                                                            { pv_cells_view.unwrap_or(empty_pv_view) }
+                                                            { pvc_cells_view.unwrap_or(empty_pvc_view) }
+                                                            { service_cells_view.unwrap_or(empty_service_view) }
+                                                            { endpointslice_cells_view.unwrap_or(empty_endpointslice_view) }
+                                                            { created_cell_view.unwrap_or(empty_created_view) }
                                                             <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:top;white-space:nowrap;">
                                                                 <div style="display:flex;gap:6px;align-items:flex-start;">
                                                                     <button on:click={
@@ -1143,7 +1698,21 @@ pub fn App() -> impl IntoView {
                                                                         <button on:click={
                                                                             let ns2 = item.reference.namespace.clone().unwrap_or_default();
                                                                             let name2 = item.reference.name.clone();
-                                                                            move |_| do_logs(ns2.clone(), name2.clone(), None)
+                                                                            let container_statuses_clone = item.container_statuses.clone();
+                                                                            move |_| {
+                                                                                // Use the first containers container (not init-containers)
+                                                                                // container_statuses list: [init-containers..., containers...]
+                                                                                // Skip all init containers (state == "init") and use first containers container
+                                                                                let container_name = container_statuses_clone
+                                                                                    .as_ref()
+                                                                                    .and_then(|cs| {
+                                                                                        // Find the first container from containers list (skip init-containers)
+                                                                                        cs.iter()
+                                                                                            .find(|c| c.state != "init")
+                                                                                            .map(|c| c.name.clone())
+                                                                                    });
+                                                                                do_logs(ns2.clone(), name2.clone(), container_name)
+                                                                            }
                                                                         }>"Logs"</button>
                                                                     </Show>
                                                                 </div>
@@ -1154,7 +1723,7 @@ pub fn App() -> impl IntoView {
                                             </tbody>
                                         </table>
                                         <Show when=move || !fr_found.get()>
-                                            { move || view! { <div style="color:#666">"请选择左侧资源类型"</div> }.into_view() }
+                                            { move || view! { <div style="color:#666">"Please select a resource type from the left"</div> }.into_view() }
                                         </Show>
                                     </div>
                                 </div>
@@ -1178,6 +1747,78 @@ pub fn App() -> impl IntoView {
                     </Show>
                     <Show when=move || logs.get().is_some()>
                         { move || {
+                            let (search_query, set_search_query) = signal::<String>(String::new());
+                            let search_input_ref = NodeRef::<leptos::html::Input>::new();
+                            let logs_content = move || logs.get().unwrap_or_default();
+                            
+                            // Highlight text with search query - returns HTML string
+                            let highlighted_logs_html = move || {
+                                let text = logs_content();
+                                let query = search_query.get();
+                                if query.is_empty() {
+                                    return text;
+                                }
+                                
+                                let query_lower = query.to_lowercase();
+                                let text_lower = text.to_lowercase();
+                                let mut result = String::new();
+                                let mut last_end = 0;
+                                let mut search_start = 0;
+                                
+                                // Find all matches and build HTML
+                                while let Some(pos) = text_lower[search_start..].find(&query_lower) {
+                                    let actual_pos = search_start + pos;
+                                    let end_pos = actual_pos + query.len();
+                                    
+                                    // Add text before match (escape HTML)
+                                    if actual_pos > last_end {
+                                        let before = &text[last_end..actual_pos];
+                                        result.push_str(&before.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;"));
+                                    }
+                                    
+                                    // Add highlighted match
+                                    let matched = &text[actual_pos..end_pos];
+                                    let escaped = matched.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+                                    result.push_str(&format!("<mark style=\"background-color:#ffeb3b;color:#000;padding:0 2px;\">{}</mark>", escaped));
+                                    
+                                    last_end = end_pos;
+                                    search_start = actual_pos + 1;
+                                }
+                                
+                                // Add remaining text
+                                if last_end < text.len() {
+                                    let remaining = &text[last_end..];
+                                    result.push_str(&remaining.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;"));
+                                }
+                                
+                                if result.is_empty() {
+                                    text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+                                } else {
+                                    result
+                                }
+                            };
+
+                            let do_copy_logs = move |_| {
+                                let content = logs_content();
+                                let payload =
+                                    serde_wasm_bindgen::to_value(&serde_json::json!({ "text": content })).unwrap();
+                                spawn_local(async move {
+                                    let _ = invoke("copy_text", payload).await;
+                                });
+                            };
+
+                            let handle_keydown_logs = move |e: KeyboardEvent| {
+                                // Check for Command+F (Mac) or Ctrl+F (Windows/Linux)
+                                let meta = e.ctrl_key() || e.meta_key();
+                                if meta && e.key_code() == 70 {
+                                    e.prevent_default();
+                                    if let Some(input) = search_input_ref.get() {
+                                        let _ = input.focus();
+                                        let _ = input.select();
+                                    }
+                                }
+                            };
+
                             let on_close = {
                                 let set_logs = set_logs.clone();
                                 let set_logs_container = set_logs_container.clone();
@@ -1187,7 +1828,7 @@ pub fn App() -> impl IntoView {
                                 }
                             };
                             view! {
-                                <div style="position:fixed;inset:0;background:rgba(0,0,0,0.45);display:flex;align-items:center;justify-content:center;z-index:1000;" on:click=on_close>
+                                <div style="position:fixed;inset:0;background:rgba(0,0,0,0.45);display:flex;align-items:center;justify-content:center;z-index:1000;" on:click=on_close on:keydown=handle_keydown_logs>
                                     <div style="background:#fff;max-width:80vw;max-height:80vh;width:900px;border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,0.2);display:flex;flex-direction:column;overflow:hidden;" on:click=move |e| e.stop_propagation()>
                                         <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid #eee;">
                                             <h3 style="margin:0;font-size:14px;color:#333">
@@ -1199,13 +1840,26 @@ pub fn App() -> impl IntoView {
                                                     }
                                                 }}
                                             </h3>
-                                            <button on:click=move |_| {
-                                                set_logs.set(None);
-                                                set_logs_container.set(None);
-                                            }>"Close"</button>
+                                            <div style="display:flex;gap:8px;">
+                                                <button on:click=do_copy_logs>"Copy"</button>
+                                                <button on:click=move |_| {
+                                                    set_logs.set(None);
+                                                    set_logs_container.set(None);
+                                                }>"Close"</button>
+                                            </div>
+                                        </div>
+                                        <div style="padding:8px 12px;border-bottom:1px solid #eee;background:#f5f5f5;">
+                                            <input
+                                                node_ref=search_input_ref
+                                                type="text"
+                                                placeholder="Search... (Cmd+F / Ctrl+F)"
+                                                value=move || search_query.get()
+                                                on:input=move |e| set_search_query.set(event_target_value(&e))
+                                                style="width:100%;padding:6px 10px;border:1px solid #ddd;border-radius:4px;font-size:13px;"
+                                            />
                                         </div>
                                         <div style="padding:0;flex:1;overflow:auto;background:#0b1021;">
-                                            <pre style="margin:0;padding:12px;white-space:pre-wrap;overflow:auto;color:#d6e1ff;text-align:left;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, &quot;Liberation Mono&quot;, &quot;Courier New&quot;, monospace;">{ move || logs.get().unwrap_or_default() }</pre>
+                                            <pre style="margin:0;padding:12px;white-space:pre-wrap;overflow:auto;color:#d6e1ff;text-align:left;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, &quot;Liberation Mono&quot;, &quot;Courier New&quot;, monospace;" inner_html=highlighted_logs_html></pre>
                                         </div>
                                     </div>
                                 </div>

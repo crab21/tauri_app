@@ -10,8 +10,7 @@ use kube::{Client, Config};
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use std::time::Duration;
-use tauri::Emitter;
-use tauri::State;
+use tauri::{Emitter, Manager, State};
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
@@ -55,6 +54,41 @@ fn guess_plural(group: &str, kind: &str) -> &'static str {
     }
 }
 
+/// 格式化错误消息，使其更人性化，去掉类型信息
+fn format_error(e: impl std::fmt::Display) -> String {
+    let error_str = format!("{}", e);
+    
+    // 处理常见的错误模式，去掉类型信息
+    let cleaned = if error_str.contains("client error (Connect)") {
+        "Failed to connect to Kubernetes cluster. Please check your network connection or cluster configuration".to_string()
+    } else if error_str.contains("client error") {
+        // 提取错误消息，去掉 "client error" 前缀和类型信息
+        error_str
+            .replace("client error (", "")
+            .replace("client error", "Connection error")
+            .replace("Connect", "Connection failed")
+            .replace(")", "")
+            .trim()
+            .to_string()
+    } else if error_str.contains("failed to load kubeconfig") {
+        "Failed to load kubeconfig file".to_string()
+    } else if error_str.contains("failed to infer kube config") {
+        "Failed to auto-detect Kubernetes configuration".to_string()
+    } else if error_str.contains("timeout") {
+        "Operation timed out. Please try again later".to_string()
+    } else {
+        // 对于其他错误，尝试提取主要消息
+        // 去掉常见的类型前缀
+        error_str
+            .replace("kube::Error(", "")
+            .replace("kube::", "")
+            .trim()
+            .to_string()
+    };
+    
+    cleaned
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct CrdSummary {
     pub name: String,
@@ -88,6 +122,23 @@ pub struct ServicePort {
     pub target_port: Option<String>, // Can be string or number
     pub protocol: Option<String>,
     pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_port: Option<i64>, // NodePort for NodePort type services
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EndpointSlicePort {
+    pub port: Option<i64>,
+    pub protocol: Option<String>,
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EndpointSliceEndpoint {
+    pub addresses: Vec<String>,
+    pub ready: Option<bool>,
+    pub serving: Option<bool>,
+    pub terminating: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -102,6 +153,41 @@ pub struct ResourceSummary {
     pub service_ports: Option<Vec<ServicePort>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service_type: Option<String>,
+    // PV fields
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pv_capacity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pv_access_modes: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pv_reclaim_policy: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pv_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pv_claim: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pv_storage_class: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pv_volume_attributes_class: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pv_reason: Option<String>,
+    // PVC fields
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pvc_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pvc_volume: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pvc_capacity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pvc_access_modes: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pvc_storage_class: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pvc_volume_attributes_class: Option<String>,
+    // EndpointSlice fields
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpointslice_ports: Option<Vec<EndpointSlicePort>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpointslice_endpoints: Option<Vec<EndpointSliceEndpoint>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -265,11 +351,13 @@ fn summarize_dynamic(obj: &DynamicObject, gvk: &GroupVersionKind) -> ResourceSum
                     });
                     let protocol = port_obj.get("protocol").and_then(|v| v.as_str()).map(|s| s.to_string());
                     let name = port_obj.get("name").and_then(|v| v.as_str()).map(|s| s.to_string());
+                    let node_port = port_obj.get("nodePort").and_then(|v| v.as_i64());
                     ports.push(ServicePort {
                         port,
                         target_port,
                         protocol,
                         name,
+                        node_port,
                     });
                 }
             }
@@ -279,6 +367,159 @@ fn summarize_dynamic(obj: &DynamicObject, gvk: &GroupVersionKind) -> ResourceSum
             (Some(ports), svc_type)
         } else {
             (None, svc_type)
+        }
+    } else {
+        (None, None)
+    };
+    
+    // Extract PV fields
+    let (pv_capacity, pv_access_modes, pv_reclaim_policy, pv_status, pv_claim, pv_storage_class, pv_volume_attributes_class, pv_reason) = if gvk.kind == "PersistentVolume" && gvk.group.is_empty() {
+        let mut capacity: Option<String> = None;
+        let mut access_modes: Option<Vec<String>> = None;
+        let mut reclaim_policy: Option<String> = None;
+        let mut status: Option<String> = None;
+        let mut claim: Option<String> = None;
+        let mut storage_class: Option<String> = None;
+        let mut volume_attributes_class: Option<String> = None;
+        let mut reason: Option<String> = None;
+        
+        if let Some(spec) = obj.data.get("spec") {
+            // Capacity
+            if let Some(cap) = spec.get("capacity").and_then(|c| c.get("storage")).and_then(|v| v.as_str()) {
+                capacity = Some(cap.to_string());
+            }
+            // Access modes
+            if let Some(modes) = spec.get("accessModes").and_then(|v| v.as_array()) {
+                access_modes = Some(modes.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect());
+            }
+            // Reclaim policy
+            if let Some(rp) = spec.get("persistentVolumeReclaimPolicy").and_then(|v| v.as_str()) {
+                reclaim_policy = Some(rp.to_string());
+            }
+            // Storage class
+            if let Some(sc) = spec.get("storageClassName").and_then(|v| v.as_str()) {
+                storage_class = Some(sc.to_string());
+            }
+            // Volume attributes class
+            if let Some(vac) = spec.get("volumeAttributesClassName").and_then(|v| v.as_str()) {
+                volume_attributes_class = Some(vac.to_string());
+            }
+        }
+        
+        if let Some(status_obj) = obj.data.get("status") {
+            // Status phase
+            if let Some(phase) = status_obj.get("phase").and_then(|v| v.as_str()) {
+                status = Some(phase.to_string());
+            }
+            // Claim reference
+            if let Some(claim_ref) = status_obj.get("claimRef") {
+                if let Some(ns) = claim_ref.get("namespace").and_then(|v| v.as_str()) {
+                    if let Some(name) = claim_ref.get("name").and_then(|v| v.as_str()) {
+                        claim = Some(format!("{}/{}", ns, name));
+                    }
+                }
+            }
+            // Reason
+            if let Some(r) = status_obj.get("reason").and_then(|v| v.as_str()) {
+                reason = Some(r.to_string());
+            }
+        }
+        
+        (capacity, access_modes, reclaim_policy, status, claim, storage_class, volume_attributes_class, reason)
+    } else {
+        (None, None, None, None, None, None, None, None)
+    };
+    
+    // Extract PVC fields
+    let (pvc_status, pvc_volume, pvc_capacity, pvc_access_modes, pvc_storage_class, pvc_volume_attributes_class) = if gvk.kind == "PersistentVolumeClaim" && gvk.group.is_empty() {
+        let mut status: Option<String> = None;
+        let mut volume: Option<String> = None;
+        let mut capacity: Option<String> = None;
+        let mut access_modes: Option<Vec<String>> = None;
+        let mut storage_class: Option<String> = None;
+        let mut volume_attributes_class: Option<String> = None;
+        
+        if let Some(spec) = obj.data.get("spec") {
+            // Access modes
+            if let Some(modes) = spec.get("accessModes").and_then(|v| v.as_array()) {
+                access_modes = Some(modes.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect());
+            }
+            // Storage class
+            if let Some(sc) = spec.get("storageClassName").and_then(|v| v.as_str()) {
+                storage_class = Some(sc.to_string());
+            }
+            // Volume attributes class
+            if let Some(vac) = spec.get("volumeAttributesClassName").and_then(|v| v.as_str()) {
+                volume_attributes_class = Some(vac.to_string());
+            }
+            // Volume name
+            if let Some(vol) = spec.get("volumeName").and_then(|v| v.as_str()) {
+                volume = Some(vol.to_string());
+            }
+        }
+        
+        if let Some(status_obj) = obj.data.get("status") {
+            // Status phase
+            if let Some(phase) = status_obj.get("phase").and_then(|v| v.as_str()) {
+                status = Some(phase.to_string());
+            }
+            // Capacity
+            if let Some(cap) = status_obj.get("capacity").and_then(|c| c.get("storage")).and_then(|v| v.as_str()) {
+                capacity = Some(cap.to_string());
+            }
+        }
+        
+        (status, volume, capacity, access_modes, storage_class, volume_attributes_class)
+    } else {
+        (None, None, None, None, None, None)
+    };
+    
+    // Extract EndpointSlice ports and endpoints
+    let (endpointslice_ports, endpointslice_endpoints) = if gvk.kind == "EndpointSlice" && gvk.group == "discovery.k8s.io" {
+        let mut ports = Vec::new();
+        let mut endpoints = Vec::new();
+        
+        // Extract ports
+        if let Some(ports_array) = obj.data.get("ports").and_then(|v| v.as_array()) {
+            for port_obj in ports_array {
+                let port = port_obj.get("port").and_then(|v| v.as_i64());
+                let protocol = port_obj.get("protocol").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let name = port_obj.get("name").and_then(|v| v.as_str()).map(|s| s.to_string());
+                ports.push(EndpointSlicePort {
+                    port,
+                    protocol,
+                    name,
+                });
+            }
+        }
+        
+        // Extract endpoints
+        if let Some(endpoints_array) = obj.data.get("endpoints").and_then(|v| v.as_array()) {
+            for endpoint_obj in endpoints_array {
+                let mut addresses = Vec::new();
+                if let Some(addresses_array) = endpoint_obj.get("addresses").and_then(|v| v.as_array()) {
+                    for addr in addresses_array {
+                        if let Some(addr_str) = addr.as_str() {
+                            addresses.push(addr_str.to_string());
+                        }
+                    }
+                }
+                let ready = endpoint_obj.get("conditions").and_then(|c| c.get("ready")).and_then(|v| v.as_bool());
+                let serving = endpoint_obj.get("conditions").and_then(|c| c.get("serving")).and_then(|v| v.as_bool());
+                let terminating = endpoint_obj.get("conditions").and_then(|c| c.get("terminating")).and_then(|v| v.as_bool());
+                endpoints.push(EndpointSliceEndpoint {
+                    addresses,
+                    ready,
+                    serving,
+                    terminating,
+                });
+            }
+        }
+        
+        if !ports.is_empty() || !endpoints.is_empty() {
+            (if !ports.is_empty() { Some(ports) } else { None }, if !endpoints.is_empty() { Some(endpoints) } else { None })
+        } else {
+            (None, None)
         }
     } else {
         (None, None)
@@ -298,6 +539,22 @@ fn summarize_dynamic(obj: &DynamicObject, gvk: &GroupVersionKind) -> ResourceSum
         container_statuses,
         service_ports,
         service_type,
+        pv_capacity,
+        pv_access_modes,
+        pv_reclaim_policy,
+        pv_status,
+        pv_claim,
+        pv_storage_class,
+        pv_volume_attributes_class,
+        pv_reason,
+        pvc_status,
+        pvc_volume,
+        pvc_capacity,
+        pvc_access_modes,
+        pvc_storage_class,
+        pvc_volume_attributes_class,
+        endpointslice_ports,
+        endpointslice_endpoints,
     }
 }
 
@@ -314,7 +571,7 @@ async fn list_k8s_overview(settings: State<'_, Mutex<K8sSettings>>) -> Result<K8
     {
         Ok(Ok(c)) => c,
         Ok(Err(e)) => {
-            errors.push(format!("kube client error: {e:#}"));
+            errors.push(format_error(&e));
             return Ok(K8sOverview {
                 crds: vec![],
                 resources: vec![],
@@ -322,7 +579,7 @@ async fn list_k8s_overview(settings: State<'_, Mutex<K8sSettings>>) -> Result<K8
             });
         }
         Err(_) => {
-            errors.push("kube client timeout".into());
+            errors.push("Operation timed out. Please try again later".into());
             return Ok(K8sOverview {
                 crds: vec![],
                 resources: vec![],
@@ -341,11 +598,11 @@ async fn list_k8s_overview(settings: State<'_, Mutex<K8sSettings>>) -> Result<K8
     {
         Ok(Ok(list)) => list.items,
         Ok(Err(e)) => {
-            errors.push(format!("list CRDs failed: {e:#}"));
+            errors.push(format_error(&e));
             Vec::new()
         }
         Err(_) => {
-            errors.push("list CRDs timeout".into());
+            errors.push("Operation timed out. Please try again later".into());
             Vec::new()
         }
     };
@@ -454,19 +711,14 @@ async fn list_k8s_overview(settings: State<'_, Mutex<K8sSettings>>) -> Result<K8
                         }
                     }
                     Ok(Err(e)) => {
-                        errors.push(format!(
-                            "list {}.{} {} failed: {e:#}",
-                            gvk.kind,
-                            gvk.version,
-                            gvk.group.clone()
-                        ));
+                        errors.push(format_error(&e));
                     }
                     Err(_) => {
                         errors.push(format!(
-                            "list {}.{} {} timeout",
+                            "Timeout while listing {}.{} {} resources",
                             gvk.kind,
                             gvk.version,
-                            gvk.group.clone()
+                            if gvk.group.is_empty() { "core" } else { &gvk.group }
                         ));
                     }
                 }
@@ -507,8 +759,8 @@ struct DescribeArgs {
 async fn describe_resource(args: DescribeArgs) -> Result<serde_json::Value, String> {
     let client = timeout(Duration::from_secs(2), load_client_with_context(None))
         .await
-        .map_err(|_| "kube client timeout".to_string())?
-        .map_err(|e| format!("{e:#}"))?;
+        .map_err(|_| "Operation timed out. Please try again later".to_string())?
+        .map_err(|e| format_error(&e))?;
     let gvk = GroupVersionKind::gvk(&args.group, &args.version, &args.kind);
     let mut ar = ApiResource::from_gvk(&gvk);
     if ar.plural.is_empty() {
@@ -523,9 +775,9 @@ async fn describe_resource(args: DescribeArgs) -> Result<serde_json::Value, Stri
     let dur = Duration::from_secs(args.timeout_secs.unwrap_or(3));
     let obj = timeout(dur, api.get(&args.name))
         .await
-        .map_err(|_| "describe timeout".to_string())?
-        .map_err(|e| format!("{e:#}"))?;
-    Ok(serde_json::to_value(&obj).unwrap_or(serde_json::json!({ "error": "serialize failed" })))
+        .map_err(|_| "Operation timed out. Please try again later".to_string())?
+        .map_err(|e| format_error(&e))?;
+    Ok(serde_json::to_value(&obj).unwrap_or(serde_json::json!({ "error": "Serialization failed" })))
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -542,8 +794,8 @@ struct PodLogArgs {
 async fn pod_logs(args: PodLogArgs) -> Result<String, String> {
     let client = timeout(Duration::from_secs(2), load_client_with_context(None))
         .await
-        .map_err(|_| "kube client timeout".to_string())?
-        .map_err(|e| format!("{e:#}"))?;
+        .map_err(|_| "Operation timed out. Please try again later".to_string())?
+        .map_err(|e| format_error(&e))?;
     let api: Api<Pod> = Api::namespaced(client, &args.namespace);
     let mut lp = LogParams::default();
     lp.container = args.container.clone();
@@ -552,8 +804,8 @@ async fn pod_logs(args: PodLogArgs) -> Result<String, String> {
     let dur = Duration::from_secs(args.timeout_secs.unwrap_or(5));
     let logs = timeout(dur, api.logs(&args.name, &lp))
         .await
-        .map_err(|_| "logs timeout".to_string())?
-        .map_err(|e| format!("{e:#}"))?;
+        .map_err(|_| "Operation timed out. Please try again later".to_string())?
+        .map_err(|e| format_error(&e))?;
     Ok(logs)
 }
 
@@ -573,20 +825,52 @@ pub fn run() {
             stop_all_watches,
             copy_text
         ])
+        .setup(|app| {
+            let window = app.get_webview_window("main").unwrap();
+            
+            // Get screen size and set window to 50% of screen, centered
+            if let Ok(Some(monitor)) = window.primary_monitor() {
+                let screen_size = monitor.size();
+                
+                // Calculate window size (50% of screen, ensure it fits)
+                let max_width = (screen_size.width as f64 - 100.0).max(800.0);
+                let max_height = (screen_size.height as f64 - 100.0).max(600.0);
+                let width = ((screen_size.width as f64 * 0.5).min(max_width)) as u32;
+                let height = ((screen_size.height as f64 * 0.5).min(max_height)) as u32;
+                
+                // Set max size to prevent window from exceeding screen
+                let _ = window.set_max_size(Some(tauri::LogicalSize::new(
+                    screen_size.width as u32,
+                    screen_size.height as u32,
+                )));
+                
+                // Set window size first
+                let _ = window.set_size(tauri::LogicalSize::new(width, height));
+                
+                // Use spawn to center window after a short delay to ensure it's fully initialized
+                let window_clone = window.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(100));
+                    let _ = window_clone.center();
+                });
+            }
+            
+            Ok(())
+        })
         .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .expect("Error while running Tauri application");
 }
 
 #[tauri::command]
 fn copy_text(text: String) -> Result<(), String> {
-    let mut cb = arboard::Clipboard::new().map_err(|e| format!("clipboard error: {e}"))?;
+    let mut cb = arboard::Clipboard::new().map_err(|e| format!("Clipboard error: {}", format_error(&e)))?;
     cb.set_text(text)
-        .map_err(|e| format!("clipboard set failed: {e}"))
+        .map_err(|e| format!("Failed to copy to clipboard: {}", format_error(&e)))
 }
 #[tauri::command]
 fn list_contexts() -> Result<serde_json::Value, String> {
     // Try read default kubeconfig and extract contexts
-    let cfg = Kubeconfig::read().map_err(|e| format!("read kubeconfig failed: {e:#}"))?;
+    let cfg = Kubeconfig::read().map_err(|e| format_error(&e))?;
     let contexts: Vec<String> = cfg.contexts.iter().map(|c| c.name.clone()).collect();
     let current = cfg.current_context.unwrap_or_default();
     Ok(serde_json::json!({
@@ -607,7 +891,7 @@ fn set_context(
 ) -> Result<(), String> {
     let mut s = settings
         .lock()
-        .map_err(|_| "settings lock poisoned".to_string())?;
+        .map_err(|_| "Settings lock failed".to_string())?;
     s.selected_context = args.name;
     // stop all watchers on context change
     for tok in s.watcher_cancels.drain(..) {
@@ -633,13 +917,13 @@ async fn start_watch(
     let token = CancellationToken::new();
     settings
         .lock()
-        .map_err(|_| "settings lock poisoned".to_string())?
+        .map_err(|_| "Settings lock failed".to_string())?
         .watcher_cancels
         .push(token.clone());
     let current_ctx = {
         settings
             .lock()
-            .map_err(|_| "settings lock poisoned".to_string())?
+            .map_err(|_| "Settings lock failed".to_string())?
             .selected_context
             .clone()
     };
@@ -737,7 +1021,7 @@ async fn start_watch(
 fn stop_all_watches(settings: State<'_, Mutex<K8sSettings>>) -> Result<(), String> {
     let mut s = settings
         .lock()
-        .map_err(|_| "settings lock poisoned".to_string())?;
+        .map_err(|_| "Settings lock failed".to_string())?;
     for tok in s.watcher_cancels.drain(..) {
         tok.cancel();
     }
