@@ -46,7 +46,7 @@ fn guess_plural(group: &str, kind: &str) -> &'static str {
         // storage
         ("storage.k8s.io", "StorageClass") => "storageclasses",
         // fallback heuristic: lowercase + 's'
-        (g, k) if !k.is_empty() => {
+        (_g, k) if !k.is_empty() => {
             // Note: returning &'static str; heuristic not used here
             // because we can't allocate; leave empty to let server error bubble up.
             ""

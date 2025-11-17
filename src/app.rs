@@ -796,10 +796,10 @@ pub fn App() -> impl IntoView {
                                         <table style="width:100%;border-collapse:collapse;">
                                             <thead>
                                                 <tr>
-                                                    <th style="text-align:left;border-bottom:1px solid #ddd;padding:6px 4px;">"Namespace"</th>
-                                                    <th style="text-align:left;border-bottom:1px solid #ddd;padding:6px 4px;">"Name"</th>
-                                                    <th style="text-align:left;border-bottom:1px solid #ddd;padding:6px 4px;">"Created"</th>
-                                                    <th style="text-align:left;border-bottom:1px solid #ddd;padding:6px 4px;">"Actions"</th>
+                                                    <th style="text-align:left;border-bottom:1px solid #ddd;padding:8px 12px;vertical-align:middle;">"Namespace"</th>
+                                                    <th style="text-align:left;border-bottom:1px solid #ddd;padding:8px 12px;vertical-align:middle;">"Name"</th>
+                                                    <th style="text-align:left;border-bottom:1px solid #ddd;padding:8px 12px;vertical-align:middle;">"Created"</th>
+                                                    <th style="text-align:left;border-bottom:1px solid #ddd;padding:8px 12px;vertical-align:middle;">"Actions"</th>
                                                 </tr>
                                             </thead>
                                             <tbody>
@@ -822,15 +822,15 @@ pub fn App() -> impl IntoView {
                                                     let r = item.reference.clone();
                                                     view! {
                                                         <tr>
-                                                            <td style="padding:6px 4px;border-bottom:1px solid #f0f0f0;">{ ns }</td>
-                                                            <td style="padding:6px 4px;border-bottom:1px solid #f0f0f0;">
-                                                                <code>{ name.clone() }</code>
+                                                            <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:middle;">{ ns }</td>
+                                                            <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:middle;">
+                                                                <code style="display:inline-block;vertical-align:middle;">{ name.clone() }</code>
                                                                 <Show when=move || is_default_sc>
-                                                                    <span style="margin-left:8px;padding:1px 6px;border-radius:10px;background:#eef;color:#335;font-size:12px;">"default"</span>
+                                                                    <span style="margin-left:8px;padding:1px 6px;border-radius:10px;background:#eef;color:#335;font-size:12px;display:inline-block;vertical-align:middle;">"default"</span>
                                                                 </Show>
                                                             </td>
-                                                            <td style="padding:6px 4px;border-bottom:1px solid #f0f0f0;">{ created }</td>
-                                                            <td style="padding:6px 4px;border-bottom:1px solid #f0f0f0;">
+                                                            <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:middle;">{ created }</td>
+                                                            <td style="text-align:left;padding:8px 12px;border-bottom:1px solid #f0f0f0;vertical-align:middle;">
                                                                 <button on:click={
                                                                     let rr = r.clone();
                                                                     move |_| do_describe(rr.clone())

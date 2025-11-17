@@ -17,3 +17,15 @@ console_error_panic_hook = "0.1.7"
 
 [workspace]
 members = ["src-tauri"]
+# use your own native target
+[target.aarch64-apple-darwin]
+rustflags = [
+  "--cfg",
+  "erase_components",
+]
+
+[target.wasm32-unknown-unknown]
+rustflags = [
+   "--cfg",
+   "erase_components",
+]
