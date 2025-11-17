@@ -999,7 +999,7 @@ pub fn App() -> impl IntoView {
     let (fr_items, set_fr_items) = signal::<Vec<ResourceSummary>>(Vec::new());
     let (fr_found, set_fr_found) = signal(false);
     // Sort state: true = ascending (oldest first), false = descending (newest first)
-    let (created_sort_asc, set_created_sort_asc) = signal(true);
+    let (created_sort_asc, set_created_sort_asc) = signal(false);
     Effect::new(move |_| {
         // establish reactive dependencies
         let ov = overview.get();
